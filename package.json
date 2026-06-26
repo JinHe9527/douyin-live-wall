@@ -1,0 +1,37 @@
+{
+  "name": "douyin-live-wall",
+  "version": "1.0.0",
+  "private": true,
+  "main": "mini-app/main.js",
+  "scripts": {
+    "start": "electron mini-app/main.js",
+    "dist:mac": "electron-builder --mac --arm64"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^26.8.1"
+  },
+  "build": {
+    "appId": "com.jinhe.douyinwall",
+    "productName": "抖音多宫格直播墙",
+    "artifactName": "DouyinLiveWall-${version}-${arch}.${ext}",
+    "files": [
+      "mini-app/**/*",
+      "lib/**/*",
+      "package.json"
+    ],
+    "directories": {
+      "output": "dist-mini"
+    },
+    "mac": {
+      "category": "public.app-category.video",
+      "identity": null,
+      "target": [
+        { "target": "dmg", "arch": "arm64" },
+        { "target": "zip", "arch": "arm64" }
+      ]
+    }
+  },
+  "description": "抖音多宫格直播墙 —— 多个抖音直播间同时观看，打开即出画面",
+  "author": "JinHe9527"
+}

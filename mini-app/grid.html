@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="./grid.css">
+</head>
+
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-dot"></span>
+      抖音多宫格直播墙
+    </div>
+
+    <div class="add-box">
+      <input id="room-input" type="text" placeholder="粘贴直播间链接或房间号，回车添加（如 https://live.douyin.com/123456789）" />
+      <button id="btn-add" class="btn btn-primary">添加</button>
+    </div>
+
+    <div class="cols-ctrl">
+      <span class="cols-label">列数</span>
+      <button class="col-btn active" data-cols="auto">自动</button>
+      <button class="col-btn" data-cols="2">2</button>
+      <button class="col-btn" data-cols="3">3</button>
+      <button class="col-btn" data-cols="4">4</button>
+    </div>
+
+    <button id="btn-settings" class="btn btn-icon" title="直播间管理 / 设置">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="3"/>
+        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+      </svg>
+    </button>
+  </header>
+
+  <main id="grid" class="grid" data-cols="auto"></main>
+
+  <div id="empty-hint" class="empty-hint">
+    <div class="empty-card">
+      <div class="empty-title">还没有直播间上墙</div>
+      <div class="empty-desc">点右上角 ⚙ 打开「直播间管理」，或在顶部粘贴链接添加直播间。<br>打开就出画面，不撞验证码、不用单独登录。</div>
+      <button id="btn-open-settings-empty" class="btn btn-primary" style="margin-top:16px;">打开直播间管理</button>
+    </div>
+  </div>
+
+  <!-- 设置 / 直播间管理 抽屉 -->
+  <div id="drawer-backdrop" class="drawer-backdrop" hidden></div>
+  <aside id="drawer" class="drawer" hidden>
+    <header class="drawer-head">
+      <div class="drawer-title">直播间管理</div>
+      <button id="drawer-close" class="icon-btn" title="关闭">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </header>
+
+    <div class="drawer-actions">
+      <button id="btn-wall-all" class="btn">全部上墙</button>
+      <button id="btn-wall-none" class="btn">全部下墙</button>
+    </div>
+
+    <div class="drawer-add">
+      <div class="drawer-add-row">
+        <input id="lib-name" class="lib-input" type="text" placeholder="名称（可选，如 宇宙009）" />
+        <input id="lib-group" class="lib-input" type="text" list="group-list" placeholder="分组（可选，如 宇宙）" />
+      </div>
+      <input id="lib-url" class="lib-input" type="text" placeholder="主播主页链接 或 直播间链接 / 房间号" />
+      <button id="btn-lib-add" class="btn btn-primary">加入库</button>
+      <datalist id="group-list"></datalist>
+    </div>
+
+    <div class="drawer-stat" id="drawer-stat"></div>
+    <div class="lib-list" id="lib-list"></div>
+  </aside>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="../lib/vendor/mpegts.js"></script>
+  <script src="./grid.js"></script>
+</body>
+
+</html>
