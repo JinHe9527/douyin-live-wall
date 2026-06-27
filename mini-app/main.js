@@ -7,13 +7,16 @@
 
 const path = require('path');
 const fs = require('fs');
-const { app, BrowserWindow, session, ipcMain } = require('electron');
+const { app, BrowserWindow, WebContentsView, session, ipcMain } = require('electron');
 const { resolveStream } = require('../lib/douyin-stream');
 
 // 复用主 app 的 userData（含 persist:douyin 登录态）。两 app 不同时跑即可。
 
 const DESKTOP_UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+// 手机 UA：详情窗口用，拿到和手机抖音一致的竖版完整直播界面（礼物/榜单/目标/评论全有）
+const MOBILE_UA =
+  'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1';
 
 const CDN_HOST_RE = /(\.douyincdn\.com|\.douyin\.com|\.amemv\.com|\.bytedance\.|\.bytecdn\.|pull-)/i;
 
@@ -130,6 +133,8 @@ async function createWindow() {
     height: 900,
     backgroundColor: '#0b0d12',
     title: '抖音多宫格直播墙',
+    // 隐藏系统标题栏、保留红绿灯：工具栏顶到最上一行，省出一整行给画面
+    titleBarStyle: 'hiddenInset',
     webPreferences: {
       session: douyinSession,
       preload: path.join(__dirname, 'preload.js'),
@@ -156,6 +161,175 @@ ipcMain.handle('mini-resolve', async (_evt, { room, quality }) => {
 
 ipcMain.handle('mini-load-rooms', () => loadRooms());
 ipcMain.handle('mini-save-rooms', (_evt, data) => { saveRooms(data); return { ok: true }; });
+
+// —— 信息模式：弹幕 WS 直连（一个 danmuHub 页扛多路） —— //
+// 在 live.douyin.com 首页（含 byted_acrawler 可算签名）里注入 danmu-bundle，
+// 一个轻页面同时连多个房间的弹幕 WS + protobuf 解码，console 通道把消息转发给主窗口。
+const DANMU_BUNDLE = fs.readFileSync(path.join(__dirname, '..', 'lib', 'vendor', 'danmu-bundle.js'), 'utf-8');
+
+let danmuHub = null;
+let danmuHubReady = null;
+let infoMode = false;
+let infoRids = [];
+const connectedRids = new Set();
+
+function ensureDanmuHub() {
+  if (danmuHubReady) return danmuHubReady;
+  danmuHubReady = (async () => {
+    const ses = session.fromPartition('persist:douyin');
+    danmuHub = new BrowserWindow({ show: false, webPreferences: { session: ses } });
+    danmuHub.webContents.setUserAgent(DESKTOP_UA);
+    danmuHub.webContents.setAudioMuted(true);
+    danmuHub.webContents.on('console-message', (_e, _l, message) => {
+      if (!message.startsWith('DM::')) return;
+      const i1 = message.indexOf('::', 4);
+      if (i1 < 0) return;
+      const rid = message.slice(4, i1);
+      let items;
+      try { items = JSON.parse(message.slice(i1 + 2)); } catch { return; }
+      if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('danmu', { rid, items });
+    });
+    await waitLoad(danmuHub, 'https://live.douyin.com/');
+    // 等 byted_acrawler 就绪（签名需要）
+    for (let i = 0; i < 24; i++) {
+      const ok = await danmuHub.webContents
+        .executeJavaScript('!!(window.byted_acrawler && window.byted_acrawler.frontierSign)')
+        .catch(() => false);
+      if (ok) break;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    await danmuHub.webContents.executeJavaScript(DANMU_BUNDLE).catch(() => {});
+    await danmuHub.webContents.executeJavaScript(
+      "window.__dyEmit=function(id,items){console.log('DM::'+id+'::'+JSON.stringify(items));};window.__dyStatus=function(){};true;"
+    ).catch(() => {});
+  })();
+  return danmuHubReady;
+}
+
+async function dyConnect(rid) {
+  if (!rid || connectedRids.has(rid)) return;
+  connectedRids.add(rid);
+  await ensureDanmuHub();
+  if (danmuHub && !danmuHub.isDestroyed()) {
+    danmuHub.webContents
+      .executeJavaScript(`window.__dyConnect&&window.__dyConnect(${JSON.stringify(rid)},${JSON.stringify(rid)})`)
+      .catch(() => {});
+  }
+}
+
+function dyDisconnect(rid) {
+  if (!connectedRids.has(rid)) return;
+  connectedRids.delete(rid);
+  if (danmuHub && !danmuHub.isDestroyed()) {
+    danmuHub.webContents
+      .executeJavaScript(`window.__dyDisconnect&&window.__dyDisconnect(${JSON.stringify(rid)})`)
+      .catch(() => {});
+  }
+}
+
+async function reconcileDanmu() {
+  const want = new Set(infoMode ? infoRids : []);
+  for (const rid of [...connectedRids]) if (!want.has(rid)) dyDisconnect(rid);
+  if (infoMode) {
+    await ensureDanmuHub();
+    for (const rid of want) dyConnect(rid);
+  }
+}
+
+// renderer 告知：信息模式开关 + 当前在墙、已解析的 webRid 列表
+ipcMain.on('mini-info-mode', (_evt, { on, rids }) => {
+  infoMode = !!on;
+  infoRids = Array.isArray(rids) ? rids.filter(Boolean) : [];
+  reconcileDanmu();
+});
+
+// —— 双击详情：独立浮窗显示手机版真实直播间（不遮挡网格，别的间照常看，限 1 个） —— //
+const blockAppScheme = (url) => /^(bytedance|snssdk|aweme|sslocal|bdscheme|zhihu):/i.test(url || '');
+
+let detailWin = null;
+let detailRid = '';
+
+ipcMain.on('open-detail', (_evt, { rid, title }) => {
+  if (!rid) return;
+  // 已有详情窗 → 同一个只聚焦不刷新；不同则换房（限 1 个）
+  if (detailWin && !detailWin.isDestroyed()) {
+    detailWin.show();
+    detailWin.focus();
+    if (detailRid !== String(rid)) {
+      detailRid = String(rid);
+      detailWin.setTitle(title || `直播间 ${rid}`);
+      detailWin.webContents.loadURL(`https://live.douyin.com/${rid}`);
+    }
+    return;
+  }
+  detailRid = String(rid);
+  detailWin = new BrowserWindow({
+    width: 440,
+    height: 900,
+    title: title || `直播间 ${rid}`,
+    backgroundColor: '#000',
+    webPreferences: {
+      session: session.fromPartition('persist:douyin'),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+  // 手机版 UA：竖版手机直播界面（礼物/榜单/目标全有）
+  detailWin.webContents.setUserAgent(MOBILE_UA);
+  detailWin.webContents.setWindowOpenHandler(({ url }) => {
+    if (!blockAppScheme(url) && /douyin\.com/.test(url)) detailWin.webContents.loadURL(url);
+    return { action: 'deny' };
+  });
+  detailWin.webContents.on('will-navigate', (e, url) => { if (blockAppScheme(url)) e.preventDefault(); });
+  detailWin.loadURL(`https://live.douyin.com/${rid}`);
+  detailWin.on('closed', () => { detailWin = null; detailRid = ''; });
+});
+
+ipcMain.on('close-detail', () => {
+  if (detailWin && !detailWin.isDestroyed()) detailWin.close();
+});
+
+// —— 扫码登录抖音（登录后真实页可看原画 + 发言；登录态存 persist:douyin） —— //
+async function isLoggedIn() {
+  try {
+    const ses = session.fromPartition('persist:douyin');
+    const cookies = await ses.cookies.get({ domain: '.douyin.com' });
+    return cookies.some((c) => /^(sessionid|sessionid_ss)$/i.test(c.name) && c.value);
+  } catch { return false; }
+}
+function pushLoginStatus() {
+  isLoggedIn().then((ok) => {
+    if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('login-status', ok);
+  });
+}
+ipcMain.handle('login-status', () => isLoggedIn());
+
+let loginWin = null;
+ipcMain.on('open-login', () => {
+  if (loginWin && !loginWin.isDestroyed()) { loginWin.focus(); return; }
+  loginWin = new BrowserWindow({
+    width: 520,
+    height: 720,
+    title: '扫码登录抖音',
+    backgroundColor: '#fff',
+    webPreferences: {
+      session: session.fromPartition('persist:douyin'),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+  loginWin.webContents.setUserAgent(DESKTOP_UA);
+  loginWin.webContents.setWindowOpenHandler(({ url }) => {
+    if (!blockAppScheme(url) && /douyin\.com/.test(url)) loginWin.webContents.loadURL(url);
+    return { action: 'deny' };
+  });
+  loginWin.webContents.on('will-navigate', (e, url) => { if (blockAppScheme(url)) e.preventDefault(); });
+  // 登录成功后页面会跳转/刷新，借此回推登录状态
+  loginWin.webContents.on('did-navigate', () => pushLoginStatus());
+  loginWin.webContents.on('did-frame-navigate', () => pushLoginStatus());
+  loginWin.loadURL('https://www.douyin.com/');
+  loginWin.on('closed', () => { loginWin = null; pushLoginStatus(); });
+});
 
 app.whenReady().then(createWindow).catch((e) => console.error('[mini] startup', e));
 

@@ -9,6 +9,8 @@ const gridEl = document.getElementById('grid');
 const emptyHint = document.getElementById('empty-hint');
 const inputEl = document.getElementById('room-input');
 const btnAdd = document.getElementById('btn-add');
+const btnBack = document.getElementById('btn-back');
+const globalQualityEl = document.getElementById('global-quality');
 const toastEl = document.getElementById('toast');
 
 // 默认直播间（首次打开自动带上，老板开箱即看）。可在「直播间管理」里增删。
@@ -42,11 +44,14 @@ const drawerStat = document.getElementById('drawer-stat');
 
 const state = {
   library: [],   // [{ id, name, brand, url, kind }]
-  rooms: [],     // 上墙(播放中) [{ id, name, brand, url, kind, webRid, title, anchor, count, flvUrl, status }]
+  rooms: [],     // 上墙(播放中) [{ id, name, brand, url, kind, webRid, title, anchor, count, flvUrl, status, quality }]
   cols: 'auto',
   soloId: null,
+  infoMode: false,
+  globalQuality: 'auto', // auto | origin | hd | sd | fluent
 };
 const players = new Map(); // id -> LivePlayer
+let savedQuality = {};     // libId -> quality（从持久化恢复）
 
 let toastTimer = null;
 function toast(msg, ms = 2200) {
@@ -70,11 +75,17 @@ function classifyInput(u) {
   return 'invalid';
 }
 
-function desiredQuality() {
+function autoQuality() {
   const n = state.rooms.length;
   if (n <= 4) return 'hd';
   if (n <= 6) return 'sd';
   return 'fluent';
+}
+// 优先级：单格 override > 全局 override > 按路数自动
+function desiredQuality(room) {
+  if (room && room.quality && room.quality !== 'auto') return room.quality;
+  if (state.globalQuality && state.globalQuality !== 'auto') return state.globalQuality;
+  return autoQuality();
 }
 
 // —— LivePlayer：单格播放 + 自愈 —— //
@@ -166,7 +177,7 @@ class LivePlayer {
 
   async reResolve() {
     try {
-      const res = await window.mini.resolve(this.room.url, desiredQuality());
+      const res = await window.mini.resolve(this.room.url, desiredQuality(this.room));
       if (res && res.ok && res.flvUrl) {
         this.room.webRid = res.webRid;
         this.room.flvUrl = res.flvUrl;
@@ -174,6 +185,7 @@ class LivePlayer {
         if (res.anchorName) this.room.anchor = res.anchorName;
         if (res.userCount) this.room.count = res.userCount;
         updateCellMeta(this.room);
+        syncInfoMode();
         this.create(res.flvUrl);
         return true;
       }
@@ -231,12 +243,26 @@ class LivePlayer {
 }
 
 // —— 渲染宫格 —— //
-function colsForCount(n) {
-  if (state.cols !== 'auto') return Number(state.cols);
-  if (n <= 1) return 1;
-  if (n <= 4) return 2;
-  if (n <= 9) return 3;
-  return 4;
+// 自动列数：填满不留空格，竖屏视频偏好更多列（每行铺得更满）
+function autoCols(n) {
+  let best = 1, bestScore = Infinity;
+  for (let cols = 1; cols <= n; cols++) {
+    const rows = Math.ceil(n / cols);
+    const empty = cols * rows - n;
+    const score = empty * 3 + Math.abs(cols - rows * 1.7);
+    if (score < bestScore) { bestScore = score; best = cols; }
+  }
+  return best;
+}
+// 格子用 CSS Grid 铺满整个区域（cols×rows 各 1fr），无空白浪费
+function applyLayout() {
+  const n = state.rooms.length;
+  if (!n) return;
+  let cols = state.cols !== 'auto' ? Number(state.cols) : autoCols(n);
+  cols = Math.max(1, Math.min(cols, n));
+  const rows = Math.ceil(n / cols);
+  gridEl.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+  gridEl.style.gridTemplateRows = `repeat(${rows}, 1fr)`;
 }
 
 function icon(name) {
@@ -245,6 +271,7 @@ function icon(name) {
     sound: '<path d="M11 5 6 9H2v6h4l5 4V5z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M19 5a9 9 0 0 1 0 14"/>',
     reload: '<path d="M23 4v6h-6"/><path d="M20.5 15a9 9 0 1 1-2.1-9.4L23 10"/>',
     full: '<path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M16 3h3a2 2 0 0 1 2 2v3"/><path d="M8 21H5a2 2 0 0 1-2-2v-3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/>',
+    detail: '<circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>',
     close: '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>',
   };
   return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${I[name]}</svg>`;
@@ -256,12 +283,23 @@ function escapeHtml(s) {
   ));
 }
 
+const QUALITY_LABEL = { auto: '自动', origin: '原画', hd: '高清', sd: '标清', fluent: '流畅' };
+
 function cellTemplate(room) {
   const isSolo = state.soloId === room.id;
   const label = room.name || room.title || room.anchor || room.url;
+  const qLabel = QUALITY_LABEL[room.quality || 'auto'] || '自动';
   return `
-  <article class="cell${isSolo ? ' solo-audio' : ''}" data-id="${room.id}">
-    <video playsinline muted></video>
+  <article class="cell${isSolo ? ' solo-audio' : ''}" data-id="${room.id}" data-rid="${room.webRid || ''}">
+    <div class="cell-infobar">
+      <span class="cell-name">${escapeHtml(label)}</span>
+      <span class="cell-online">${room.count ? escapeHtml(room.count) + ' 在线' : ''}</span>
+    </div>
+    <div class="cell-stage">
+      <div class="cell-gifts"></div>
+      <div class="cell-video"><video playsinline muted></video></div>
+      <div class="cell-comments"></div>
+    </div>
     <div class="cell-status" data-state="loading">
       <div class="cell-spinner"></div>
       <div class="cell-status-text">连接直播流…</div>
@@ -274,7 +312,14 @@ function cellTemplate(room) {
       <span class="cell-count">${room.count ? escapeHtml(room.count) + ' 人' : ''}</span>
     </div>
     <div class="cell-ctrl">
+      <div class="cell-quality">
+        <button class="icon-btn act-quality" title="清晰度" data-act="quality">${qLabel}</button>
+        <div class="quality-menu" hidden>
+          ${['auto', 'origin', 'hd', 'sd', 'fluent'].map((q) => `<button data-q="${q}">${QUALITY_LABEL[q]}</button>`).join('')}
+        </div>
+      </div>
       <button class="icon-btn act-audio${isSolo ? ' on' : ''}" title="独占音频" data-act="audio">${icon(isSolo ? 'sound' : 'mute')}</button>
+      <button class="icon-btn act-detail" title="信息：评论/在线/贡献榜叠在画面上（双击格子同效）" data-act="detail">${icon('detail')}</button>
       <button class="icon-btn act-reload" title="刷新" data-act="reload">${icon('reload')}</button>
       <button class="icon-btn act-full" title="全屏" data-act="full">${icon('full')}</button>
       <button class="icon-btn act-close" title="下墙" data-act="close">${icon('close')}</button>
@@ -285,20 +330,22 @@ function cellTemplate(room) {
 function updateCellMeta(room) {
   const cell = gridEl.querySelector(`.cell[data-id="${room.id}"]`);
   if (!cell) return;
+  if (room.webRid) cell.dataset.rid = room.webRid;
+  const label = room.name || room.title || room.anchor || room.url;
   const titleEl = cell.querySelector('.cell-title');
   const countEl = cell.querySelector('.cell-count');
-  if (titleEl) titleEl.textContent = room.name || room.title || room.anchor || room.url;
+  const nameEl = cell.querySelector('.cell-name');
+  const onlineEl = cell.querySelector('.cell-online');
+  if (titleEl) titleEl.textContent = label;
   if (countEl) countEl.textContent = room.count ? `${room.count} 人` : '';
+  if (nameEl) nameEl.textContent = label;
+  if (onlineEl) onlineEl.textContent = room.count ? `${room.count} 在线` : '';
 }
 
-function applyColumns() {
-  const cols = colsForCount(state.rooms.length);
-  gridEl.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
-}
 
 function renderGrid() {
   emptyHint.hidden = state.rooms.length > 0;
-  applyColumns();
+  applyLayout();
 
   for (const p of players.values()) p.destroy();
   players.clear();
@@ -315,6 +362,7 @@ function renderGrid() {
     lp.start(room.flvUrl || '');
   }
   applyAudioSolo();
+  syncInfoMode();
 }
 
 function applyAudioSolo() {
@@ -356,6 +404,7 @@ function putOnWall(libId, opts = {}) {
   const room = {
     id: lib.id, name: lib.name, brand: lib.brand, url: lib.url, kind: lib.kind,
     webRid: '', title: '', anchor: '', count: '', flvUrl: '', status: 'loading',
+    quality: savedQuality[lib.id] || '',
   };
   state.rooms.push(room);
   if (!opts.noRender) { persist(); renderGrid(); renderLibList(); }
@@ -391,6 +440,7 @@ function openDrawer() {
   drawer.hidden = false;
   drawerBackdrop.hidden = false;
   renderLibList();
+  refreshLoginStatus();
 }
 function closeDrawer() {
   drawer.hidden = true;
@@ -484,12 +534,115 @@ function fullscreenCell(id) {
   else cell.requestFullscreen().catch(() => {});
 }
 
+
+// —— 信息模式 + 清晰度 + 弹幕 —— //
+function wallRids() {
+  return state.rooms.map((r) => r.webRid).filter(Boolean);
+}
+// 弹幕/信息叠层已停用：网格保持纯净画面
+function syncInfoMode() { /* no-op：纯净画面，不叠任何东西 */ }
+
+// 双击 / ⓘ：在 app 内打开该直播间的真实抖音页（完整功能，限 1 个）
+// 双击 / ⓘ：独立浮窗打开手机版真实直播间（网格照常播，不受影响）
+function openDetail(id) {
+  const room = state.rooms.find((r) => r.id === id);
+  if (!room) return;
+  if (!room.webRid) { toast('该直播间还没连上，稍等一下再双击'); return; }
+  window.mini.openDetail(room.webRid, room.name || room.title || '');
+}
+
+function setGlobalQuality(q) {
+  state.globalQuality = q;
+  persist();
+  for (const room of state.rooms) {
+    if (room.quality && room.quality !== 'auto') continue; // 有单格 override，不动
+    const lp = players.get(room.id);
+    if (lp) { lp.attempts = 0; lp.start(''); }
+  }
+}
+
+function setRoomQuality(id, q) {
+  const room = state.rooms.find((r) => r.id === id);
+  if (!room) return;
+  room.quality = q === 'auto' ? '' : q;
+  const cell = gridEl.querySelector(`.cell[data-id="${id}"]`);
+  if (cell) {
+    const btn = cell.querySelector('.act-quality');
+    if (btn) btn.textContent = QUALITY_LABEL[q] || '自动';
+    const menu = cell.querySelector('.quality-menu');
+    if (menu) menu.hidden = true;
+  }
+  persist();
+  const lp = players.get(id);
+  if (lp) { lp.attempts = 0; lp.start(''); }
+}
+
+// 弹幕渲染
+const DANMU_MAX = 60;
+// 一批弹幕（{rid, items:[...]}）：评论→右，贡献榜→左，在线→顶部
+function handleDanmu(payload) {
+  if (!payload || !payload.rid || !Array.isArray(payload.items)) return;
+  const cell = gridEl.querySelector(`.cell[data-rid="${payload.rid}"]`);
+  if (!cell) return;
+  const comments = cell.querySelector('.cell-comments');
+  for (const it of payload.items) {
+    if (it.type === 'online') updateOnlineCell(cell, payload.rid, it.online);
+    else if (it.type === 'rank') renderRank(cell, it.list);
+    else appendComment(comments, it);
+  }
+}
+
+function appendComment(panel, it) {
+  if (!panel) return;
+  const line = document.createElement('div');
+  line.className = 'dm-line'
+    + (it.type === 'join' ? ' dm-join' : '')
+    + (it.type === 'like' ? ' dm-like' : '')
+    + (it.type === 'social' ? ' dm-social' : '');
+  if (it.user) {
+    const u = document.createElement('span');
+    u.className = 'dm-user';
+    u.textContent = it.user + (it.type === 'chat' ? '：' : ' ');
+    line.appendChild(u);
+  }
+  const c = document.createElement('span');
+  c.className = 'dm-text';
+  c.textContent = it.content || (it.type === 'join' ? '来了' : '');
+  line.appendChild(c);
+  panel.appendChild(line);
+  while (panel.children.length > DANMU_MAX) panel.removeChild(panel.firstChild);
+  panel.scrollTop = panel.scrollHeight;
+}
+
+// 贡献榜（真实 top 送礼人）整块替换渲染到左面板
+function renderRank(cell, list) {
+  const panel = cell.querySelector('.cell-gifts');
+  if (!panel || !Array.isArray(list)) return;
+  panel.innerHTML = '<div class="rank-title">贡献榜</div>'
+    + list.map((r) =>
+      `<div class="rank-line"><span class="rank-no">${escapeHtml(String(r.rank))}</span><span class="rank-name">${escapeHtml(r.nickname || '')}</span></div>`
+    ).join('');
+}
+
+function updateOnlineCell(cell, rid, online) {
+  if (!online) return;
+  const room = state.rooms.find((r) => r.webRid === rid);
+  if (room) room.count = online;
+  const onlineEl = cell.querySelector('.cell-online');
+  if (onlineEl) onlineEl.textContent = `${online} 在线`;
+}
+
 // —— 持久化 —— //
 function persist() {
+  const quality = {};
+  for (const r of state.rooms) if (r.quality) quality[r.id] = r.quality;
   window.mini.saveRooms({
     cols: state.cols,
     library: state.library,
     wall: state.rooms.map((r) => r.id),
+    infoMode: state.infoMode,
+    globalQuality: state.globalQuality,
+    quality,
   });
 }
 
@@ -503,22 +656,72 @@ document.querySelectorAll('.col-btn').forEach((btn) => {
     btn.classList.add('active');
     state.cols = btn.dataset.cols;
     persist();
-    applyColumns();
+    applyLayout();
   });
 });
 
 gridEl.addEventListener('click', (e) => {
+  // 单格清晰度菜单项
+  const qOpt = e.target.closest('.quality-menu button[data-q]');
+  if (qOpt) {
+    const c = e.target.closest('.cell');
+    if (c) setRoomQuality(c.dataset.id, qOpt.dataset.q);
+    return;
+  }
   const btn = e.target.closest('.icon-btn');
   if (!btn) return;
   const cell = e.target.closest('.cell');
   if (!cell) return;
   const id = cell.dataset.id;
   const act = btn.dataset.act;
-  if (act === 'audio') soloAudio(id);
+  if (act === 'quality') {
+    const menu = cell.querySelector('.quality-menu');
+    // 先关其它已开的
+    gridEl.querySelectorAll('.quality-menu').forEach((m) => { if (m !== menu) m.hidden = true; });
+    if (menu) menu.hidden = !menu.hidden;
+  } else if (act === 'audio') soloAudio(id);
   else if (act === 'reload') reloadRoom(id);
+  else if (act === 'detail') openDetail(id);
   else if (act === 'full') fullscreenCell(id);
   else if (act === 'close') takeOffWall(id);
 });
+
+// 双击格子 → 打开该直播间的真实抖音页（完整功能）
+gridEl.addEventListener('dblclick', (e) => {
+  if (e.target.closest('.icon-btn') || e.target.closest('.quality-menu')) return;
+  const cell = e.target.closest('.cell');
+  if (cell) openDetail(cell.dataset.id);
+});
+
+// 点别处关闭清晰度菜单
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('.cell-quality')) {
+    gridEl.querySelectorAll('.quality-menu').forEach((m) => { m.hidden = true; });
+  }
+});
+
+// 返回宫格（关闭真实页详情）
+// 扫码登录抖音 + 登录状态
+const btnLogin = document.getElementById('btn-login');
+const loginDot = document.getElementById('login-dot');
+function updateLoginUI(ok) {
+  if (btnLogin) {
+    btnLogin.textContent = ok ? '✓ 已登录抖音（点此切换账号）' : '扫码登录抖音';
+    btnLogin.classList.toggle('btn-primary', !ok);
+  }
+  if (loginDot) {
+    loginDot.classList.toggle('on', !!ok);
+    loginDot.title = ok ? '抖音登录状态：已登录' : '抖音登录状态：未登录';
+  }
+}
+async function refreshLoginStatus() {
+  try { updateLoginUI(await window.mini.getLoginStatus()); } catch {}
+}
+if (btnLogin) btnLogin.addEventListener('click', () => { window.mini.openLogin(); toast('请在弹出的窗口里扫码登录'); });
+if (window.mini.onLoginStatus) window.mini.onLoginStatus(updateLoginUI);
+refreshLoginStatus();
+// 全局清晰度
+if (globalQualityEl) globalQualityEl.addEventListener('change', () => setGlobalQuality(globalQualityEl.value));
 
 // 抽屉
 btnSettings.addEventListener('click', openDrawer);
@@ -572,6 +775,9 @@ async function init() {
   }
   state.library = (saved && Array.isArray(saved.library)) ? saved.library : [];
   let wall = (saved && Array.isArray(saved.wall)) ? saved.wall : [];
+  savedQuality = (saved && saved.quality && typeof saved.quality === 'object') ? saved.quality : {};
+  state.globalQuality = (saved && saved.globalQuality) || 'auto';
+  if (globalQualityEl) globalQualityEl.value = state.globalQuality;
 
   // 首次打开（没有任何保存）→ 载入默认直播间，开箱即看
   const firstRun = !saved || (!state.library.length && !(saved.rooms && saved.rooms.length));

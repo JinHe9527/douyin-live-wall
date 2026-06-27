@@ -9,10 +9,7 @@
 
 <body>
   <header class="topbar">
-    <div class="brand">
-      <span class="brand-dot"></span>
-      抖音多宫格直播墙
-    </div>
+    <div class="brand">抖音多宫格直播墙</div>
 
     <div class="add-box">
       <input id="room-input" type="text" placeholder="粘贴直播间链接或房间号，回车添加（如 https://live.douyin.com/123456789）" />
@@ -26,6 +23,19 @@
       <button class="col-btn" data-cols="3">3</button>
       <button class="col-btn" data-cols="4">4</button>
     </div>
+
+    <div class="quality-ctrl">
+      <span class="cols-label">清晰度</span>
+      <select id="global-quality" class="mini-select" title="设置所有直播间清晰度">
+        <option value="auto">自动</option>
+        <option value="origin">原画</option>
+        <option value="hd">高清</option>
+        <option value="sd">标清</option>
+        <option value="fluent">流畅</option>
+      </select>
+    </div>
+
+    <span id="login-dot" class="login-dot" title="抖音登录状态：未登录"></span>
 
     <button id="btn-settings" class="btn btn-icon" title="直播间管理 / 设置">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -56,9 +66,11 @@
     </header>
 
     <div class="drawer-actions">
+      <button id="btn-login" class="btn btn-primary">扫码登录抖音</button>
       <button id="btn-wall-all" class="btn">全部上墙</button>
       <button id="btn-wall-none" class="btn">全部下墙</button>
     </div>
+    <div class="drawer-stat" style="padding-top:0;">登录后：双击打开的真实直播间可看原画、可发言。不登录也能看（原画限 26 秒）。</div>
 
     <div class="drawer-add">
       <div class="drawer-add-row">

@@ -26,19 +26,21 @@ html, body {
 
 /* —— 顶栏 —— */
 .topbar {
-  height: 56px;
+  height: 40px;
   display: flex;
   align-items: center;
-  gap: 16px;
-  padding: 0 16px;
+  gap: 14px;
+  padding: 0 14px;
   background: var(--panel);
   border-bottom: 1px solid var(--border);
   -webkit-app-region: drag;
 }
 .topbar .add-box,
 .topbar .cols-ctrl,
+.topbar .quality-ctrl,
 .topbar button,
-.topbar input { -webkit-app-region: no-drag; }
+.topbar input,
+.topbar select { -webkit-app-region: no-drag; }
 
 .brand {
   display: flex;
@@ -63,7 +65,7 @@ html, body {
 }
 #room-input {
   flex: 1;
-  height: 34px;
+  height: 28px;
   padding: 0 12px;
   font-size: 13px;
   color: var(--fg);
@@ -76,8 +78,8 @@ html, body {
 #room-input::placeholder { color: var(--muted); }
 
 .btn {
-  height: 34px;
-  padding: 0 14px;
+  height: 28px;
+  padding: 0 13px;
   font-size: 13px;
   color: var(--fg);
   background: var(--panel-2);
@@ -99,7 +101,7 @@ html, body {
 .cols-ctrl { display: flex; align-items: center; gap: 4px; }
 .cols-label { font-size: 12px; color: var(--muted); margin-right: 4px; }
 .col-btn {
-  width: 34px; height: 30px;
+  width: 30px; height: 26px;
   font-size: 12px;
   color: var(--muted);
   background: transparent;
@@ -112,31 +114,131 @@ html, body {
 /* —— 宫格 —— */
 .grid {
   position: absolute;
-  top: 56px; left: 0; right: 0; bottom: 0;
+  top: 40px; left: 0; right: 0; bottom: 0;
   display: grid;
-  gap: 10px;
-  padding: 12px;
-  grid-auto-rows: 1fr;
-  align-content: stretch;
+  gap: 4px;
+  padding: 4px;
+  /* grid-template-columns / rows 由 JS applyLayout 按路数填满设置 */
 }
 
 .cell {
   position: relative;
+  min-width: 0;
+  min-height: 0;
   background: #000;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 8px;
   overflow: hidden;
-  min-height: 0;
-  min-width: 0;
 }
 .cell.solo-audio { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 
-.cell video {
+/* 舞台：默认就是满格视频；信息模式变三段式 [礼物|视频|评论] */
+/* 视频铺满整格 */
+.cell-stage { position: absolute; inset: 0; }
+.cell-video { width: 100%; height: 100%; }
+.cell-video video {
   width: 100%;
   height: 100%;
-  object-fit: contain;
+  object-fit: cover; /* 网格里铺满格子、无黑边（轻微裁切边缘） */
   background: #000;
   display: block;
+}
+/* 全屏放大时显示完整画面，不裁切 */
+.cell:fullscreen .cell-video video,
+.cell:-webkit-full-screen .cell-video video { object-fit: contain; }
+
+/* —— 信息叠层（直接盖在画面上，不挤压、不开新窗口） —— */
+/* 顶部：名字 + 在线人数 */
+.cell-infobar {
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  display: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 9px;
+  background: linear-gradient(180deg, rgba(0, 0, 0, .72), transparent);
+  z-index: 4;
+  font-size: 12px;
+  pointer-events: none;
+}
+.cell-name {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: #fff; font-weight: 600; text-shadow: 0 1px 2px rgba(0, 0, 0, .9);
+}
+.cell-online { flex: none; color: #ff7a8a; text-shadow: 0 1px 2px rgba(0, 0, 0, .9); }
+
+/* 左上：贡献榜（真实 top 送礼人） */
+.cell-gifts {
+  position: absolute;
+  top: 30px; left: 6px;
+  display: none;
+  flex-direction: column;
+  gap: 1px;
+  max-width: 44%;
+  padding: 5px 7px;
+  background: rgba(0, 0, 0, .42);
+  border-radius: 8px;
+  font-size: 11px;
+  z-index: 3;
+  pointer-events: none;
+}
+/* 底部：评论滚动（盖在画面上，像直播间一样） */
+.cell-comments {
+  position: absolute;
+  left: 6px; bottom: 6px;
+  display: none;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 2px;
+  width: 64%;
+  max-height: 48%;
+  overflow: hidden;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: linear-gradient(0deg, rgba(0, 0, 0, .42), transparent);
+  font-size: 12px;
+  line-height: 1.35;
+  z-index: 3;
+  pointer-events: none;
+}
+/* 该格开了信息 → 显示叠层 */
+.cell.show-info .cell-infobar,
+.cell.show-info .cell-gifts,
+.cell.show-info .cell-comments { display: flex; }
+
+/* 弹幕行 */
+.dm-line {
+  word-break: break-word;
+  color: #f0f3f8;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, .95);
+  animation: dmIn .18s ease;
+}
+@keyframes dmIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+.dm-user { color: #7fb6ff; }
+.dm-join { color: #6b7280; }
+.dm-join .dm-user { color: #8a93a3; }
+.dm-like { color: #9aa4b2; }
+.dm-social { color: #9ad0a0; }
+
+/* 贡献榜（左面板） */
+.rank-title {
+  color: #ffd28a; font-weight: 600;
+  padding: 0 0 2px;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, .95);
+}
+.rank-line {
+  display: flex; align-items: center; gap: 5px;
+  padding: 1px 0;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, .95);
+}
+.rank-no {
+  flex: none; width: 14px; text-align: center;
+  color: #ff9f6b; font-weight: 600;
+}
+.rank-name {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: #eef2f7;
 }
 
 /* 状态遮罩 */
@@ -206,7 +308,7 @@ html, body {
 
 /* 空状态 */
 .empty-hint {
-  position: absolute; inset: 56px 0 0 0;
+  position: absolute; inset: 40px 0 0 0;
   display: flex; align-items: center; justify-content: center;
   pointer-events: none;
 }
@@ -217,7 +319,7 @@ html, body {
 
 /* —— 顶栏图标按钮 —— */
 .btn-icon {
-  width: 36px; height: 34px;
+  width: 32px; height: 28px;
   display: flex; align-items: center; justify-content: center;
   padding: 0;
 }
@@ -340,6 +442,58 @@ html, body {
 .lib-del:hover { color: #ff6b6b; border-color: #ff6b6b; }
 .lib-del svg { width: 14px; height: 14px; }
 .lib-empty { padding: 30px 12px; text-align: center; color: var(--muted); font-size: 13px; }
+
+/* 全局清晰度下拉 + 信息开关 */
+.quality-ctrl { display: flex; align-items: center; gap: 4px; }
+.mini-select {
+  height: 28px; padding: 0 6px;
+  font-size: 12px; color: var(--fg);
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: 7px;
+  outline: none; cursor: pointer;
+}
+.btn.active { background: var(--accent); color: #03121a; border-color: transparent; font-weight: 600; }
+
+/* 详情遮罩（手机版直播页两侧的暗背景） */
+.detail-backdrop {
+  position: absolute;
+  top: 40px; left: 0; right: 0; bottom: 0;
+  background: #06080c;
+  z-index: 30;
+}
+.detail-backdrop[hidden] { display: none; }
+
+/* 登录状态小圆点（顶栏） */
+.login-dot {
+  -webkit-app-region: no-drag;
+  width: 9px; height: 9px; flex: none;
+  border-radius: 50%;
+  background: #5a6472;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, .06);
+}
+.login-dot.on {
+  background: #38d39f;
+  box-shadow: 0 0 7px rgba(56, 211, 159, .8);
+}
+
+/* 单格清晰度按钮 + 菜单 */
+.cell-quality { position: relative; }
+.icon-btn.act-quality {
+  width: auto; min-width: 30px; padding: 0 7px;
+  font-size: 11px; font-weight: 600;
+}
+.quality-menu {
+  position: absolute; bottom: calc(100% + 4px); right: 0;
+  display: flex; flex-direction: column;
+  background: rgba(20, 24, 32, .98); border: 1px solid var(--border);
+  border-radius: 8px; overflow: hidden; z-index: 20;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .5);
+}
+.quality-menu[hidden] { display: none; }
+.quality-menu button {
+  padding: 6px 16px; font-size: 12px; color: var(--fg);
+  background: transparent; border: none; cursor: pointer; white-space: nowrap; text-align: left;
+}
+.quality-menu button:hover { background: var(--panel-2); }
 
 /* toast */
 .toast {
