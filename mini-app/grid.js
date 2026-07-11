@@ -49,6 +49,7 @@ const state = {
   soloId: null,
   infoMode: false,
   globalQuality: 'auto', // auto | origin | hd | sd | fluent
+  hudAlways: false,      // 名字/分辨率/帧率/码率 是否常驻显示
 };
 const players = new Map(); // id -> LivePlayer
 let savedQuality = {};     // libId -> quality（从持久化恢复）
@@ -120,6 +121,31 @@ class LivePlayer {
     this.statusEl.dataset.state = stateName;
     const t = this.statusEl.querySelector('.cell-status-text');
     if (t && text != null) t.textContent = text;
+    // 非直播状态：清掉在线/分辨率/帧率/码率 + 红点（下播了就不显示这些）
+    const live = stateName === 'live';
+    if (!live) { this.room.stats = {}; this.room.count = ''; }
+    this.updateStats();
+    const cell = gridEl.querySelector(`.cell[data-id="${this.room.id}"]`);
+    if (cell) {
+      const dot = cell.querySelector('.cell-live-dot');
+      if (dot) dot.style.display = live ? '' : 'none';
+    }
+  }
+
+  // 悬停浮层：在线人数 · 分辨率 · 帧率 · 码率
+  updateStats() {
+    if (this.destroyed) return;
+    const cell = gridEl.querySelector(`.cell[data-id="${this.room.id}"]`);
+    if (!cell) return;
+    const el = cell.querySelector('.cell-stats');
+    if (!el) return;
+    const st = this.room.stats || {};
+    const parts = [];
+    if (this.room.count) parts.push(`${this.room.count} 在线`);
+    if (st.w && st.h) parts.push(`${st.w}×${st.h}`);
+    if (st.fps) parts.push(`${st.fps}fps`);
+    if (st.kbps) parts.push(st.kbps >= 1000 ? `${(st.kbps / 1000).toFixed(1)}Mbps` : `${st.kbps}kbps`);
+    el.textContent = parts.join(' · ');
   }
 
   armStall() {
@@ -156,6 +182,29 @@ class LivePlayer {
       }
     );
     player.on(window.mpegts.Events.ERROR, (type, detail) => this.recover(`mpegts:${type}:${detail}`));
+    // 分辨率 / 标称帧率
+    player.on(window.mpegts.Events.MEDIA_INFO, (mi) => {
+      if (!this.room.stats) this.room.stats = {};
+      this.room.stats.w = mi.width || this.room.stats.w || 0;
+      this.room.stats.h = mi.height || this.room.stats.h || 0;
+      if (mi.fps) this.room.stats.fps = Math.round(mi.fps);
+      this.updateStats();
+    });
+    // 实时下载速度(换算实时码率) + 解码帧数(算实时帧率)
+    this._lastFrames = 0;
+    this._lastStatTs = 0;
+    player.on(window.mpegts.Events.STATISTICS_INFO, (s) => {
+      if (!this.room.stats) this.room.stats = {};
+      if (typeof s.speed === 'number') this.room.stats.kbps = Math.round(s.speed * 8); // speed KB/s → kbps
+      const now = (window.performance && performance.now()) || Date.now();
+      if (typeof s.decodedFrames === 'number' && this._lastStatTs) {
+        const dt = (now - this._lastStatTs) / 1000;
+        const df = s.decodedFrames - this._lastFrames;
+        if (dt >= 0.5 && df >= 0) this.room.stats.fps = Math.round(df / dt);
+      }
+      if (typeof s.decodedFrames === 'number') { this._lastFrames = s.decodedFrames; this._lastStatTs = now; }
+      this.updateStats();
+    });
     player.attachMediaElement(this.videoEl);
     player.load();
     const p = this.videoEl.play();
@@ -185,6 +234,7 @@ class LivePlayer {
         if (res.anchorName) this.room.anchor = res.anchorName;
         if (res.userCount) this.room.count = res.userCount;
         updateCellMeta(this.room);
+        this.updateStats();
         syncInfoMode();
         this.create(res.flvUrl);
         return true;
@@ -320,7 +370,7 @@ function cellTemplate(room) {
         <span class="cell-live-dot"></span>
         <span class="cell-title">${escapeHtml(label)}</span>
       </div>
-      <span class="cell-count">${room.count ? escapeHtml(room.count) + ' 人' : ''}</span>
+      <span class="cell-stats"></span>
     </div>
     <div class="cell-ctrl">
       <div class="cell-quality">
@@ -653,6 +703,7 @@ function persist() {
     wall: state.rooms.map((r) => r.id),
     infoMode: state.infoMode,
     globalQuality: state.globalQuality,
+    hudAlways: state.hudAlways,
     quality,
   });
 }
@@ -737,6 +788,18 @@ refreshLoginStatus();
 // 全局清晰度
 if (globalQualityEl) globalQualityEl.addEventListener('change', () => setGlobalQuality(globalQualityEl.value));
 
+// 常显信息开关（名字/分辨率/帧率/码率 常驻显示，否则悬停显示）
+const btnHud = document.getElementById('btn-hud');
+function applyHudAlways() {
+  gridEl.classList.toggle('hud-always', !!state.hudAlways);
+  if (btnHud) btnHud.classList.toggle('active', !!state.hudAlways);
+}
+if (btnHud) btnHud.addEventListener('click', () => {
+  state.hudAlways = !state.hudAlways;
+  applyHudAlways();
+  persist();
+});
+
 // 抽屉
 btnSettings.addEventListener('click', openDrawer);
 if (btnOpenSettingsEmpty) btnOpenSettingsEmpty.addEventListener('click', openDrawer);
@@ -779,6 +842,17 @@ setInterval(() => {
   for (const lp of players.values()) lp.recheck();
 }, 150000);
 
+// 每 45s 刷新在播房间的在线人数（只更新数字，不重建播放）
+setInterval(async () => {
+  for (const lp of players.values()) {
+    if (lp.destroyed || lp.room.status !== 'live' || !lp.room.webRid) continue;
+    try {
+      const res = await window.mini.resolve(lp.room.webRid, 'fluent');
+      if (res && res.userCount) { lp.room.count = res.userCount; lp.updateStats(); }
+    } catch { /* ignore */ }
+  }
+}, 45000);
+
 // —— 启动 —— //
 async function init() {
   let saved;
@@ -791,6 +865,8 @@ async function init() {
   let wall = (saved && Array.isArray(saved.wall)) ? saved.wall : [];
   savedQuality = (saved && saved.quality && typeof saved.quality === 'object') ? saved.quality : {};
   state.globalQuality = (saved && saved.globalQuality) || 'auto';
+  state.hudAlways = !!(saved && saved.hudAlways);
+  applyHudAlways();
   if (globalQualityEl) globalQualityEl.value = state.globalQuality;
 
   // 首次打开（没有任何保存）→ 载入默认直播间，开箱即看
