@@ -22,7 +22,7 @@ const CDN_HOST_RE = /(\.douyincdn\.com|\.douyin\.com|\.amemv\.com|\.bytedance\.|
 
 let mainWin = null;
 let resolverWin = null;
-let resolverReady = false;
+let resolverReady = null; // Promise：并发调用共享同一次建窗，避免开机 8 路并发各建一窗漏窗
 
 function roomsStorePath() {
   return path.join(app.getPath('userData'), 'mini_rooms.json');
@@ -76,16 +76,21 @@ function waitLoad(win, url, timeoutMs = 12000) {
 }
 
 // 常驻隐藏解析页：停在 live.douyin.com（带 persist:douyin 登录），供 resolveStream 用。
-async function ensureResolver(douyinSession) {
-  if (resolverWin && !resolverWin.isDestroyed() && resolverReady) return;
-  resolverWin = new BrowserWindow({
-    show: false,
-    webPreferences: { session: douyinSession, offscreen: false },
-  });
-  resolverWin.webContents.setUserAgent(DESKTOP_UA);
-  await waitLoad(resolverWin, 'https://live.douyin.com/');
-  await new Promise((r) => setTimeout(r, 1200));
-  resolverReady = true;
+// 并发安全：用 promise 记忆化，开机多路 resolve 同时调用只会建 1 个窗口（同 ensureDanmuHub 写法）。
+function ensureResolver(douyinSession) {
+  if (resolverReady && resolverWin && !resolverWin.isDestroyed()) return resolverReady;
+  resolverReady = (async () => {
+    resolverWin = new BrowserWindow({
+      show: false,
+      webPreferences: { session: douyinSession, offscreen: false },
+    });
+    resolverWin.webContents.setUserAgent(DESKTOP_UA);
+    // 常驻停在 live.douyin.com 首页，首页会自动播推荐直播间且带声 → 必须静音，否则漏「别的直播间」的音
+    resolverWin.webContents.setAudioMuted(true);
+    await waitLoad(resolverWin, 'https://live.douyin.com/');
+    await new Promise((r) => setTimeout(r, 1200));
+  })();
+  return resolverReady;
 }
 
 function resolverRunJs(code) {
@@ -102,6 +107,8 @@ async function ensureNav(douyinSession) {
     webPreferences: { session: douyinSession, offscreen: false },
   });
   navWin.webContents.setUserAgent(DESKTOP_UA);
+  // 兜底解析会导航到直播间页（自动播放带声）→ 同样静音，纯解析窗口不出声
+  navWin.webContents.setAudioMuted(true);
   await waitLoad(navWin, 'about:blank', 3000);
 }
 
@@ -331,7 +338,18 @@ ipcMain.on('open-login', () => {
   loginWin.on('closed', () => { loginWin = null; pushLoginStatus(); });
 });
 
-app.whenReady().then(createWindow).catch((e) => console.error('[mini] startup', e));
+// 单实例锁：防止重复启动多个 app 抢资源导致卡顿
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (mainWin && !mainWin.isDestroyed()) {
+      if (mainWin.isMinimized()) mainWin.restore();
+      mainWin.focus();
+    }
+  });
+  app.whenReady().then(createWindow).catch((e) => console.error('[mini] startup', e));
+}
 
 app.on('window-all-closed', () => app.quit());
 app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });

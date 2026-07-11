@@ -190,7 +190,7 @@ class LivePlayer {
         return true;
       }
       if (res && res.status === 'offline') { this.setState('offline', '未开播'); return true; }
-      if (res && res.status === 'ended') { this.setState('ended', '直播已结束'); return true; }
+      if (res && res.status === 'ended') { this.setState('ended', '未开播'); return true; }
     } catch { /* ignore */ }
     return false;
   }
@@ -243,26 +243,37 @@ class LivePlayer {
 }
 
 // —— 渲染宫格 —— //
-// 自动列数：填满不留空格，竖屏视频偏好更多列（每行铺得更满）
-function autoCols(n) {
-  let best = 1, bestScore = Infinity;
-  for (let cols = 1; cols <= n; cols++) {
-    const rows = Math.ceil(n / cols);
-    const empty = cols * rows - n;
-    const score = empty * 3 + Math.abs(cols - rows * 1.7);
-    if (score < bestScore) { bestScore = score; best = cols; }
-  }
-  return best;
-}
-// 格子用 CSS Grid 铺满整个区域（cols×rows 各 1fr），无空白浪费
+// 计算 9:16 格子的最大尺寸：保持竖屏真实比例、尽量放大、整体居中
+const LAYOUT_GAP = 8;
+const LAYOUT_PAD = 8;
 function applyLayout() {
   const n = state.rooms.length;
   if (!n) return;
-  let cols = state.cols !== 'auto' ? Number(state.cols) : autoCols(n);
-  cols = Math.max(1, Math.min(cols, n));
-  const rows = Math.ceil(n / cols);
-  gridEl.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
-  gridEl.style.gridTemplateRows = `repeat(${rows}, 1fr)`;
+  const W = gridEl.clientWidth - LAYOUT_PAD * 2;
+  const H = gridEl.clientHeight - LAYOUT_PAD * 2;
+  if (W <= 0 || H <= 0) return;
+  // 手动指定列数时按它（但不超过路数）；自动时试所有列数取最大面积
+  const forced = state.cols !== 'auto' ? Math.min(Number(state.cols), n) : null;
+  let best = { area: 0, cellW: 0, cols: 1 };
+  const tryCols = (cols) => {
+    if (cols < 1) return;
+    const rows = Math.ceil(n / cols);
+    let cellW = (W - LAYOUT_GAP * (cols - 1)) / cols;
+    let cellH = (cellW * 16) / 9;
+    if (cellH * rows + LAYOUT_GAP * (rows - 1) > H) {
+      cellH = (H - LAYOUT_GAP * (rows - 1)) / rows;
+      cellW = (cellH * 9) / 16;
+    }
+    if (cellW > 0 && cellW * cellH > best.area) best = { area: cellW * cellH, cellW, cols };
+  };
+  if (forced) tryCols(forced);
+  else for (let c = 1; c <= n; c++) tryCols(c);
+  if (best.cellW > 0) {
+    const w = Math.floor(best.cellW);
+    gridEl.style.setProperty('--cell-w', w + 'px');
+    // 用 CSS Grid 显式列数，保证每行正好 cols 个、正确换行
+    gridEl.style.gridTemplateColumns = `repeat(${best.cols}, ${w}px)`;
+  }
 }
 
 function icon(name) {
@@ -659,6 +670,9 @@ document.querySelectorAll('.col-btn').forEach((btn) => {
     applyLayout();
   });
 });
+
+// 窗口尺寸变化 → 重新计算 9:16 格子大小
+window.addEventListener('resize', applyLayout);
 
 gridEl.addEventListener('click', (e) => {
   // 单格清晰度菜单项

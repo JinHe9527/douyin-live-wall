@@ -1,12 +1,13 @@
 {
   "name": "douyin-live-wall",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "main": "mini-app/main.js",
   "scripts": {
     "dev": "electron mini-app/main.js",
     "start": "electron mini-app/main.js",
-    "dist:mac": "electron-builder --mac --arm64"
+    "dist:mac": "electron-builder --mac --arm64 --x64",
+    "dist:win": "electron-builder --win --x64"
   },
   "devDependencies": {
     "electron": "^33.0.0",
@@ -18,29 +19,34 @@
     "appId": "com.jinhe.douyinwall",
     "productName": "抖音多宫格直播墙",
     "executableName": "DouyinLiveWall",
-    "electronDist": "node_modules/electron/dist",
-    "artifactName": "DouyinLiveWall-${version}-${arch}.${ext}",
+    "artifactName": "DouyinLiveWall-${version}-${os}-${arch}.${ext}",
     "files": [
       "mini-app/**/*",
       "lib/**/*",
       "package.json"
     ],
     "directories": {
-      "output": "dist-mini"
+      "output": "dist-mini",
+      "buildResources": "build"
     },
     "mac": {
       "category": "public.app-category.video",
       "identity": null,
       "target": [
-        {
-          "target": "dmg",
-          "arch": "arm64"
-        },
-        {
-          "target": "zip",
-          "arch": "arm64"
-        }
+        { "target": "dmg", "arch": ["arm64", "x64"] },
+        { "target": "zip", "arch": ["arm64", "x64"] }
       ]
+    },
+    "win": {
+      "target": [
+        { "target": "nsis", "arch": ["x64"] }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "shortcutName": "抖音多宫格直播墙"
     }
   },
   "description": "抖音多宫格直播墙 —— 多个抖音直播间同时观看，打开即出画面",

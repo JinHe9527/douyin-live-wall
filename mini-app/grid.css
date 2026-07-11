@@ -116,15 +116,18 @@ html, body {
   position: absolute;
   top: 40px; left: 0; right: 0; bottom: 0;
   display: grid;
-  gap: 4px;
-  padding: 4px;
-  /* grid-template-columns / rows 由 JS applyLayout 按路数填满设置 */
+  justify-content: center;
+  align-content: center;
+  gap: 8px;
+  padding: 8px;
+  overflow: hidden;
+  /* grid-template-columns 由 JS applyLayout 显式设置为 repeat(列数, 格宽) */
 }
 
 .cell {
   position: relative;
-  min-width: 0;
-  min-height: 0;
+  width: var(--cell-w, 300px);
+  aspect-ratio: 9 / 16; /* 竖屏直播真实比例，画面不变形、不裁切 */
   background: #000;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -139,7 +142,7 @@ html, body {
 .cell-video video {
   width: 100%;
   height: 100%;
-  object-fit: cover; /* 网格里铺满格子、无黑边（轻微裁切边缘） */
+  object-fit: contain; /* 9:16 格子 + 9:16 视频 = 正好铺满，不变形不裁切 */
   background: #000;
   display: block;
 }
