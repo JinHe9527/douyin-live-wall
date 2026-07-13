@@ -7,7 +7,7 @@
 
 const path = require('path');
 const fs = require('fs');
-const { app, BrowserWindow, WebContentsView, session, ipcMain } = require('electron');
+const { app, BrowserWindow, WebContentsView, session, ipcMain, dialog, shell, net } = require('electron');
 const { resolveStream } = require('../lib/douyin-stream');
 
 // 复用主 app 的 userData（含 persist:douyin 登录态）。两 app 不同时跑即可。
@@ -341,6 +341,84 @@ ipcMain.on('open-login', () => {
   loginWin.on('closed', () => { loginWin = null; pushLoginStatus(); });
 });
 
+// —— 自动更新 —— //
+// Windows：electron-updater 全自动（后台下载→提示重启装好，未签名也能用）。
+// Mac：未签名无法走 Squirrel 静默更新，改为查 GitHub 最新版→应用内提示→一键打开下载页。
+const UPDATE_OWNER = 'JinHe9527';
+const UPDATE_REPO = 'douyin-live-wall'; // 公开发布仓库（安装包所在）
+const UPDATE_RELEASES_URL = `https://github.com/${UPDATE_OWNER}/${UPDATE_REPO}/releases/latest`;
+
+function cmpVer(a, b) { // a>b → 正数
+  const pa = String(a).split('.').map((x) => parseInt(x, 10) || 0);
+  const pb = String(b).split('.').map((x) => parseInt(x, 10) || 0);
+  for (let i = 0; i < 3; i++) { const d = (pa[i] || 0) - (pb[i] || 0); if (d) return d; }
+  return 0;
+}
+function infoBox(message, detail) {
+  if (mainWin && !mainWin.isDestroyed()) dialog.showMessageBox(mainWin, { type: 'info', message, detail, buttons: ['好'] });
+}
+function fetchJson(url) {
+  return new Promise((resolve, reject) => {
+    const req = net.request({ url, headers: { Accept: 'application/vnd.github+json', 'User-Agent': UPDATE_REPO } });
+    let data = '';
+    req.on('response', (res) => {
+      if (res.statusCode >= 300) { reject(new Error('http ' + res.statusCode)); req.abort(); return; }
+      res.on('data', (c) => { data += c; });
+      res.on('end', () => { try { resolve(JSON.parse(data)); } catch (e) { reject(e); } });
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+let winUpdWired = false;
+function checkWinUpdate(manual) {
+  let autoUpdater;
+  try { ({ autoUpdater } = require('electron-updater')); } catch { if (manual) infoBox('检查更新失败', '更新组件未就绪'); return; }
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = true;
+  checkWinUpdate._manual = manual;
+  if (!winUpdWired) {
+    winUpdWired = true;
+    autoUpdater.on('update-not-available', () => { if (checkWinUpdate._manual) infoBox('已是最新版本', `当前 v${app.getVersion()}`); });
+    autoUpdater.on('error', () => { if (checkWinUpdate._manual) infoBox('检查更新失败', '请稍后再试或手动到发布页下载'); });
+    autoUpdater.on('update-downloaded', async (info) => {
+      const r = await dialog.showMessageBox(mainWin, {
+        type: 'info', defaultId: 0, cancelId: 1, buttons: ['立即重启更新', '稍后'],
+        message: `新版本 v${info && info.version} 已下载完成`,
+        detail: '点「立即重启」马上装好新版；选「稍后」则下次退出时自动更新。',
+      });
+      if (r.response === 0) setImmediate(() => autoUpdater.quitAndInstall());
+    });
+  }
+  autoUpdater.checkForUpdates().catch(() => { if (manual) infoBox('检查更新失败', '请检查网络后重试'); });
+}
+
+async function checkMacUpdate(manual) {
+  try {
+    const j = await fetchJson(`https://api.github.com/repos/${UPDATE_OWNER}/${UPDATE_REPO}/releases/latest`);
+    const latest = String((j && j.tag_name) || '').replace(/^v/, '');
+    const cur = app.getVersion();
+    if (latest && cmpVer(latest, cur) > 0) {
+      const r = await dialog.showMessageBox(mainWin, {
+        type: 'info', defaultId: 0, cancelId: 1, buttons: ['前往下载', '稍后'],
+        message: `发现新版本 v${latest}`,
+        detail: `当前 v${cur}。点「前往下载」获取最新安装包，下载后覆盖安装即可（设置会保留）。`,
+      });
+      if (r.response === 0) shell.openExternal((j && j.html_url) || UPDATE_RELEASES_URL);
+    } else if (manual) {
+      infoBox('已是最新版本', `当前 v${cur}`);
+    }
+  } catch { if (manual) infoBox('检查更新失败', '请检查网络后重试'); }
+}
+
+function checkForUpdate(manual) {
+  if (!app.isPackaged) { if (manual) infoBox('开发环境不检查更新', '打包后的正式版才会自动更新'); return; }
+  if (process.platform === 'win32') checkWinUpdate(manual);
+  else checkMacUpdate(manual);
+}
+ipcMain.handle('check-update', () => { checkForUpdate(true); return { ok: true }; });
+
 // 单实例锁：防止重复启动多个 app 抢资源导致卡顿
 if (!app.requestSingleInstanceLock()) {
   app.quit();
@@ -355,7 +433,12 @@ if (!app.requestSingleInstanceLock()) {
       createWindow();
     }
   });
-  app.whenReady().then(createWindow).catch((e) => console.error('[mini] startup', e));
+  app.whenReady().then(() => {
+    createWindow();
+    // 启动稳定后自动查一次，之后每 6 小时查一次（有新版就提示，不用你手动重下）
+    setTimeout(() => checkForUpdate(false), 8000);
+    setInterval(() => checkForUpdate(false), 6 * 3600 * 1000);
+  }).catch((e) => console.error('[mini] startup', e));
 }
 
 app.on('window-all-closed', () => app.quit());

@@ -49,6 +49,8 @@ jobs:
             dist-mini/*.dmg
             dist-mini/*.zip
             dist-mini/*.exe
+            dist-mini/*.yml
+            dist-mini/*.blockmap
           fail_on_unmatched_files: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

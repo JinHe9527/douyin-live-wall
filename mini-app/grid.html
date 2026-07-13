@@ -35,6 +35,8 @@
       </select>
     </div>
 
+    <button id="btn-live-only" class="btn" title="只显示当前正在直播的直播间，已下播/未开播的自动隐藏，在播的铺满整墙">只看在播</button>
+
     <button id="btn-hud" class="btn" title="常驻显示每个直播间的名字/分辨率/帧率/码率（否则悬停才显示）">常显信息</button>
 
     <span id="login-dot" class="login-dot" title="抖音登录状态：未登录"></span>
@@ -48,6 +50,13 @@
   </header>
 
   <main id="grid" class="grid" data-cols="auto"></main>
+
+  <div id="liveonly-empty" class="empty-hint" hidden>
+    <div class="empty-card">
+      <div class="empty-title">当前没有正在直播的直播间</div>
+      <div class="empty-desc">已开启「只看在播」，等有主播开播会自动出现。<br>点顶部「只看在播」可切回显示全部。</div>
+    </div>
+  </div>
 
   <div id="empty-hint" class="empty-hint">
     <div class="empty-card">
@@ -71,6 +80,7 @@
       <button id="btn-login" class="btn btn-primary">扫码登录抖音</button>
       <button id="btn-wall-all" class="btn">全部上墙</button>
       <button id="btn-wall-none" class="btn">全部下墙</button>
+      <button id="btn-check-update" class="btn">检查更新</button>
     </div>
     <div class="drawer-stat" style="padding-top:0;">登录后：双击打开的真实直播间可看原画、可发言。不登录也能看（原画限 26 秒）。</div>
 

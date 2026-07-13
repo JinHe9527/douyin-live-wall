@@ -50,6 +50,7 @@ const state = {
   infoMode: false,
   globalQuality: 'auto', // auto | origin | hd | sd | fluent
   hudAlways: false,      // 名字/分辨率/帧率/码率 是否常驻显示
+  liveOnly: false,       // 只显示当前在播（已下播/未开播的自动隐藏，其余格子铺满整墙）
 };
 const players = new Map(); // id -> LivePlayer
 let savedQuality = {};     // libId -> quality（从持久化恢复）
@@ -89,6 +90,15 @@ function desiredQuality(room) {
   return autoQuality();
 }
 
+// —— 只看在播 —— //
+// 仅隐藏「已确认没在播」的格子(offline/ended/error)；loading/重连中 保持可见，避免直播抖动时格子闪进闪出
+function isHiddenByLiveOnly(room) {
+  return state.liveOnly && (room.status === 'offline' || room.status === 'ended' || room.status === 'error');
+}
+function visibleRoomCount() {
+  return state.rooms.reduce((n, r) => n + (isHiddenByLiveOnly(r) ? 0 : 1), 0);
+}
+
 // —— LivePlayer：单格播放 + 自愈 —— //
 class LivePlayer {
   constructor(videoEl, statusEl, room) {
@@ -102,17 +112,19 @@ class LivePlayer {
     this.stallTimer = null;
     this.lastTime = 0;
     this.destroyed = false;
-    this.MAX_ATTEMPTS = 8;
-    this.STALL_MS = 7000;
+    this.endedStrikes = 0;     // 连续几次接口确认"没在播"，需 ≥2 才判未开播（防单次接口抖动/风控误判）
+    this.STALL_MS = 12000;     // 卡顿判定放宽到 12s（原画高码率短卡顿是常态）
 
     videoEl.muted = true;
     videoEl.addEventListener('playing', () => {
       this.setState('live');
       this.attempts = 0;
+      this.endedStrikes = 0;   // 成功播放 → 重置"没在播"计数
       this.lastTime = videoEl.currentTime;
       this.armStall();
     });
-    videoEl.addEventListener('ended', () => this.setState('ended', '直播已结束'));
+    // 直播流不该真结束：video 触发 ended 多半是网络抖动/流过期 → 自愈重连，让接口去确认是否真下播
+    videoEl.addEventListener('ended', () => { if (!this.destroyed) this.recover('video-ended'); });
   }
 
   setState(stateName, text) {
@@ -130,6 +142,8 @@ class LivePlayer {
       const dot = cell.querySelector('.cell-live-dot');
       if (dot) dot.style.display = live ? '' : 'none';
     }
+    // 只看在播模式下：状态一变就重算可见性+布局（在播的出现/下播的隐藏并让其它铺满）
+    if (state.liveOnly) applyLiveOnly();
   }
 
   // 悬停浮层：在线人数 · 分辨率 · 帧率 · 码率
@@ -182,27 +196,46 @@ class LivePlayer {
       }
     );
     player.on(window.mpegts.Events.ERROR, (type, detail) => this.recover(`mpegts:${type}:${detail}`));
-    // 分辨率 / 标称帧率
+    // 分辨率(精确) + 标称帧率(仅作实测就绪前的兜底显示)
     player.on(window.mpegts.Events.MEDIA_INFO, (mi) => {
       if (!this.room.stats) this.room.stats = {};
       this.room.stats.w = mi.width || this.room.stats.w || 0;
       this.room.stats.h = mi.height || this.room.stats.h || 0;
-      if (mi.fps) this.room.stats.fps = Math.round(mi.fps);
+      if (mi.fps && !this.room.stats.fpsReal) this.room.stats.fps = Math.round(mi.fps); // 实测帧率一旦就绪就不再被标称值覆盖
       this.updateStats();
     });
-    // 实时下载速度(换算实时码率) + 解码帧数(算实时帧率)
-    this._lastFrames = 0;
-    this._lastStatTs = 0;
+    // 真实帧率/码率：全部用累计计数器在 5s 滚动窗口上实测，避免瞬时突发导致的跳动
+    // - decodedFrames = 实际解码总帧数(getVideoPlaybackQuality)，Δ帧/Δ时 = 真实帧率
+    // - s.speed = 上一秒下载 KB/s(突发)，对时间积分得累计接收字节，Δ字节/Δ时 = 真实交付码率
+    this._statWin = [];       // [{t, frames, kb}]
+    this._cumKB = 0;          // 累计已接收 KB
+    this._lastSpeedTs = 0;
+    const STAT_WINDOW_MS = 5000;
     player.on(window.mpegts.Events.STATISTICS_INFO, (s) => {
+      if (this.destroyed) return;
       if (!this.room.stats) this.room.stats = {};
-      if (typeof s.speed === 'number') this.room.stats.kbps = Math.round(s.speed * 8); // speed KB/s → kbps
       const now = (window.performance && performance.now()) || Date.now();
-      if (typeof s.decodedFrames === 'number' && this._lastStatTs) {
-        const dt = (now - this._lastStatTs) / 1000;
-        const df = s.decodedFrames - this._lastFrames;
-        if (dt >= 0.5 && df >= 0) this.room.stats.fps = Math.round(df / dt);
+      // 把"上一秒速率"积分成累计字节(速率×时间=字节)，与采样频率无关，恒等于真实已下载量
+      if (typeof s.speed === 'number') {
+        if (this._lastSpeedTs) {
+          const dt = (now - this._lastSpeedTs) / 1000;
+          if (dt > 0 && dt < 5) this._cumKB += s.speed * dt; // KB
+        }
+        this._lastSpeedTs = now;
       }
-      if (typeof s.decodedFrames === 'number') { this._lastFrames = s.decodedFrames; this._lastStatTs = now; }
+      const frames = (typeof s.decodedFrames === 'number') ? s.decodedFrames : null;
+      this._statWin.push({ t: now, frames, kb: this._cumKB });
+      while (this._statWin.length > 2 && now - this._statWin[0].t > STAT_WINDOW_MS) this._statWin.shift();
+      const first = this._statWin[0];
+      const span = (now - first.t) / 1000;
+      if (span >= 1.5) { // 窗口够长才输出，保证平滑真实
+        const dKB = this._cumKB - first.kb;
+        this.room.stats.kbps = Math.max(0, Math.round((dKB * 8) / span)); // KB×8/s = kbps(真实交付码率)
+        if (frames != null && first.frames != null && frames - first.frames >= 0) {
+          this.room.stats.fps = Math.round((frames - first.frames) / span); // 真实解码帧率
+          this.room.stats.fpsReal = true;
+        }
+      }
       this.updateStats();
     });
     player.attachMediaElement(this.videoEl);
@@ -219,8 +252,9 @@ class LivePlayer {
       this.setState('loading', '连接直播流…');
       this.create(flvUrl);
     } else {
+      this.setState('loading', '连接直播流…');
       const ok = await this.reResolve();
-      if (!ok) this.setState('error', '无法获取直播流');
+      if (!ok && !this.destroyed) this.recover('initial'); // 首次没定 → 转入自愈重连（真下播会在重连中2次确认后显示未开播）
     }
   }
 
@@ -228,6 +262,7 @@ class LivePlayer {
     try {
       const res = await window.mini.resolve(this.room.url, desiredQuality(this.room));
       if (res && res.ok && res.flvUrl) {
+        this.endedStrikes = 0;
         this.room.webRid = res.webRid;
         this.room.flvUrl = res.flvUrl;
         if (res.title) this.room.title = res.title;
@@ -239,8 +274,13 @@ class LivePlayer {
         this.create(res.flvUrl);
         return true;
       }
-      if (res && res.status === 'offline') { this.setState('offline', '未开播'); return true; }
-      if (res && res.status === 'ended') { this.setState('ended', '未开播'); return true; }
+      // "没在播"(offline 主页没开播 / ended 接口已结束)：单次都可能是接口抖动/风控/主页加载失败，
+      // 一律要连续 ≥2 次确认才显示未开播，否则当临时问题继续重连 —— 彻底堵死"在播却显示下播"
+      if (res && (res.status === 'offline' || res.status === 'ended')) {
+        this.endedStrikes += 1;
+        if (this.endedStrikes >= 2) { this.setState(res.status, '未开播'); return true; }
+        return false;
+      }
     } catch { /* ignore */ }
     return false;
   }
@@ -259,14 +299,14 @@ class LivePlayer {
     this.recovering = true;
     this.clearTimers();
     this.attempts += 1;
-    if (this.attempts > this.MAX_ATTEMPTS) { this.setState('error', '直播流中断'); return; }
-    this.setState('loading', `重连中…(${this.attempts})`);
-    const delay = Math.min(this.attempts * 1000, 6000);
+    this.setState('loading', '重连中…');
+    const delay = Math.min(this.attempts * 800, 10000); // 递增退避，封顶 10s，持续重连不放弃
     this.recoverTimer = setTimeout(async () => {
       this.recovering = false;
+      if (this.destroyed) return;
       const ok = await this.reResolve();
-      if (!ok && this.room.flvUrl) this.create(this.room.flvUrl);
-      else if (!ok) this.recover('retry');
+      // ok=true：已明确(在播已重播 / 连续2次确认未开播)；false：还没定 → 继续重连
+      if (!ok) this.recover('retry');
     }, delay);
   }
 
@@ -297,7 +337,7 @@ class LivePlayer {
 const LAYOUT_GAP = 8;
 const LAYOUT_PAD = 8;
 function applyLayout() {
-  const n = state.rooms.length;
+  const n = visibleRoomCount(); // 只按「可见(在播/连接中)」的格子数布局，让在播的铺满整墙
   if (!n) return;
   const W = gridEl.clientWidth - LAYOUT_PAD * 2;
   const H = gridEl.clientHeight - LAYOUT_PAD * 2;
@@ -424,6 +464,7 @@ function renderGrid() {
   }
   applyAudioSolo();
   syncInfoMode();
+  applyLiveOnly();
 }
 
 function applyAudioSolo() {
@@ -704,6 +745,7 @@ function persist() {
     infoMode: state.infoMode,
     globalQuality: state.globalQuality,
     hudAlways: state.hudAlways,
+    liveOnly: state.liveOnly,
     quality,
   });
 }
@@ -800,6 +842,36 @@ if (btnHud) btnHud.addEventListener('click', () => {
   persist();
 });
 
+// 只看在播开关
+const btnLiveOnly = document.getElementById('btn-live-only');
+const liveOnlyEmpty = document.getElementById('liveonly-empty');
+function applyLiveOnly() {
+  if (btnLiveOnly) btnLiveOnly.classList.toggle('active', !!state.liveOnly);
+  gridEl.classList.toggle('live-only', !!state.liveOnly);
+  for (const room of state.rooms) {
+    const cell = gridEl.querySelector(`.cell[data-id="${room.id}"]`);
+    if (cell) cell.classList.toggle('cell-hidden', isHiddenByLiveOnly(room));
+  }
+  // 开了只看在播、但一个在播的都没有 → 给个提示，别让整墙空着让人以为坏了
+  if (liveOnlyEmpty) {
+    liveOnlyEmpty.hidden = !(state.liveOnly && state.rooms.length > 0 && visibleRoomCount() === 0);
+  }
+  applyLayout();
+}
+if (btnLiveOnly) btnLiveOnly.addEventListener('click', () => {
+  state.liveOnly = !state.liveOnly;
+  applyLiveOnly();
+  persist();
+  toast(state.liveOnly ? '只显示当前在播' : '显示全部直播间');
+});
+
+// 手动检查更新
+const btnCheckUpdate = document.getElementById('btn-check-update');
+if (btnCheckUpdate) btnCheckUpdate.addEventListener('click', async () => {
+  toast('正在检查更新…');
+  try { await window.mini.checkUpdate(); } catch { /* 主进程会弹窗提示 */ }
+});
+
 // 抽屉
 btnSettings.addEventListener('click', openDrawer);
 if (btnOpenSettingsEmpty) btnOpenSettingsEmpty.addEventListener('click', openDrawer);
@@ -842,16 +914,18 @@ setInterval(() => {
   for (const lp of players.values()) lp.recheck();
 }, 150000);
 
-// 每 45s 刷新在播房间的在线人数（只更新数字，不重建播放）
+// 每 90s 刷新在播房间的在线人数（只更新数字，不改播放状态；错峰避免接口密集触发风控）
 setInterval(async () => {
   for (const lp of players.values()) {
     if (lp.destroyed || lp.room.status !== 'live' || !lp.room.webRid) continue;
     try {
       const res = await window.mini.resolve(lp.room.webRid, 'fluent');
+      // 只取在线人数，绝不因此改播放状态（接口这次抽风也不影响画面）
       if (res && res.userCount) { lp.room.count = res.userCount; lp.updateStats(); }
     } catch { /* ignore */ }
+    await new Promise((r) => setTimeout(r, 400)); // 逐个错峰，别一次性打爆接口
   }
-}, 45000);
+}, 90000);
 
 // —— 启动 —— //
 async function init() {
@@ -867,6 +941,7 @@ async function init() {
   state.globalQuality = (saved && saved.globalQuality) || 'auto';
   state.hudAlways = !!(saved && saved.hudAlways);
   applyHudAlways();
+  state.liveOnly = !!(saved && saved.liveOnly);
   if (globalQualityEl) globalQualityEl.value = state.globalQuality;
 
   // 首次打开（没有任何保存）→ 载入默认直播间，开箱即看

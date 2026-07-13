@@ -14,4 +14,5 @@ contextBridge.exposeInMainWorld('mini', {
   openLogin: () => ipcRenderer.send('open-login'),
   getLoginStatus: () => ipcRenderer.invoke('login-status'),
   onLoginStatus: (cb) => ipcRenderer.on('login-status', (_e, ok) => cb(ok)),
+  checkUpdate: () => ipcRenderer.invoke('check-update'),
 });

@@ -325,6 +325,9 @@ html, body {
   pointer-events: none;
 }
 .empty-hint[hidden] { display: none; }
+
+/* 只看在播：隐藏已确认没在播的格子，剩下的由 applyLayout 重新铺满 */
+.cell.cell-hidden { display: none !important; }
 .empty-card { text-align: center; }
 .empty-title { font-size: 18px; font-weight: 600; margin-bottom: 10px; }
 .empty-desc { font-size: 13px; color: var(--muted); line-height: 1.7; }
