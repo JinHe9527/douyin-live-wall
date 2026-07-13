@@ -150,6 +150,9 @@ async function createWindow() {
     },
   });
   mainWin.loadFile(path.join(__dirname, 'grid.html'));
+  // 关主窗口 = 退出整个 app（连同隐藏的解析页一起关，进程干净退出）
+  // 否则隐藏页残留会挡住 window-all-closed，导致二次打开被单实例锁挡在外面
+  mainWin.on('closed', () => { try { app.quit(); } catch { /* ignore */ } });
 
   await ensureResolver(douyinSession);
 }
@@ -345,7 +348,11 @@ if (!app.requestSingleInstanceLock()) {
   app.on('second-instance', () => {
     if (mainWin && !mainWin.isDestroyed()) {
       if (mainWin.isMinimized()) mainWin.restore();
+      mainWin.show();
       mainWin.focus();
+    } else {
+      // 主窗口已关但进程还在 → 兜底重建，避免"点了没反应/进不去"
+      createWindow();
     }
   });
   app.whenReady().then(createWindow).catch((e) => console.error('[mini] startup', e));
