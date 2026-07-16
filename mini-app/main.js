@@ -10,6 +10,14 @@ const fs = require('fs');
 const { app, BrowserWindow, WebContentsView, session, ipcMain, dialog, shell, net } = require('electron');
 const { resolveStream } = require('../lib/douyin-stream');
 
+// —— 多路视频解码性能开关（必须在 app ready 之前设置）——
+// 目标：多个直播间同时解码不卡。强制开启 GPU 硬解、防止后台降帧、有硬件 HEVC 的机器可硬解原画。
+app.commandLine.appendSwitch('ignore-gpu-blocklist');                 // 部分机器 GPU 被 Chromium 拉黑 → 强制启用硬件加速
+app.commandLine.appendSwitch('enable-gpu-rasterization');
+app.commandLine.appendSwitch('enable-zero-copy');
+app.commandLine.appendSwitch('enable-features', 'PlatformHEVCDecoderSupport'); // 有硬件 HEVC 解码的机器可硬解原画(bytevc1)
+app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion'); // 防止窗口被判"被遮挡"而暂停/降帧解码
+
 // 复用主 app 的 userData（含 persist:douyin 登录态）。两 app 不同时跑即可。
 
 const DESKTOP_UA =
@@ -147,6 +155,7 @@ async function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      backgroundThrottling: false, // 监控墙常在后台，禁止后台降频，保证画面持续流畅
     },
   });
   mainWin.loadFile(path.join(__dirname, 'grid.html'));

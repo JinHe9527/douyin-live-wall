@@ -78,9 +78,10 @@ function classifyInput(u) {
 }
 
 function autoQuality() {
+  // 宫格里每格很小，没必要原画/高清；多路时用轻量 H.264 档，解码压力小很多（原画是 HEVC 高码率，只在单格手动选时才用）
   const n = state.rooms.length;
-  if (n <= 4) return 'hd';
-  if (n <= 6) return 'sd';
+  if (n <= 2) return 'hd';
+  if (n <= 4) return 'sd';
   return 'fluent';
 }
 // 优先级：单格 override > 全局 override > 按路数自动
@@ -189,8 +190,8 @@ class LivePlayer {
         enableStashBuffer: false,
         stashInitialSize: 128,
         liveBufferLatencyChasing: true,
-        liveBufferLatencyMaxLatency: 3.0,
-        liveBufferLatencyMinRemain: 0.5,
+        liveBufferLatencyMaxLatency: 5.0,  // 3→5s：减少追帧跳变，弱机上更平滑(监控墙可容忍几秒延迟)
+        liveBufferLatencyMinRemain: 1.0,
         lazyLoad: false,
         autoCleanupSourceBuffer: true,
       }
@@ -453,6 +454,8 @@ function renderGrid() {
 
   gridEl.innerHTML = state.rooms.map(cellTemplate).join('');
 
+  // 错峰起播：逐个间隔启动，避免开机瞬间 N 路同时解码 + 同时取流把 CPU/GPU 打爆（"卡到加载不出来"的主因）
+  let startIdx = 0;
   for (const room of state.rooms) {
     const cell = gridEl.querySelector(`.cell[data-id="${room.id}"]`);
     if (!cell) continue;
@@ -460,7 +463,14 @@ function renderGrid() {
     const statusEl = cell.querySelector('.cell-status');
     const lp = new LivePlayer(videoEl, statusEl, room);
     players.set(room.id, lp);
-    lp.start(room.flvUrl || '');
+    const delay = startIdx * 450; // 每路间隔 450ms 起播
+    if (delay === 0) {
+      lp.start(room.flvUrl || '');
+    } else {
+      lp.setState('loading', '排队加载…');
+      setTimeout(() => { if (!lp.destroyed) lp.start(room.flvUrl || ''); }, delay);
+    }
+    startIdx += 1;
   }
   applyAudioSolo();
   syncInfoMode();
