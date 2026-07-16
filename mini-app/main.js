@@ -7,8 +7,11 @@
 
 const path = require('path');
 const fs = require('fs');
-const { app, BrowserWindow, WebContentsView, session, ipcMain, dialog, shell, net } = require('electron');
+const { app, BrowserWindow, WebContentsView, session, ipcMain, dialog, shell, net, Menu } = require('electron');
 const { resolveStream } = require('../lib/douyin-stream');
+
+// 隐藏顶部原生菜单栏(File/Edit/View… 那两条)。Mac 保留系统菜单(否则复制粘贴/退出快捷键会失效)。
+if (process.platform !== 'darwin') Menu.setApplicationMenu(null);
 
 // —— 多路视频解码性能开关（必须在 app ready 之前设置）——
 // 目标：多个直播间同时解码不卡。强制开启 GPU 硬解、防止后台降帧、有硬件 HEVC 的机器可硬解原画。
@@ -150,6 +153,7 @@ async function createWindow() {
     title: '抖音多宫格直播墙',
     // 隐藏系统标题栏、保留红绿灯：工具栏顶到最上一行，省出一整行给画面
     titleBarStyle: 'hiddenInset',
+    autoHideMenuBar: true, // Windows/Linux：隐藏菜单栏(File/Edit…)
     webPreferences: {
       session: douyinSession,
       preload: path.join(__dirname, 'preload.js'),
@@ -158,6 +162,7 @@ async function createWindow() {
       backgroundThrottling: false, // 监控墙常在后台，禁止后台降频，保证画面持续流畅
     },
   });
+  mainWin.setMenuBarVisibility(false);
   mainWin.loadFile(path.join(__dirname, 'grid.html'));
   // 关主窗口 = 退出整个 app（连同隐藏的解析页一起关，进程干净退出）
   // 否则隐藏页残留会挡住 window-all-closed，导致二次打开被单实例锁挡在外面
@@ -350,12 +355,15 @@ ipcMain.on('open-login', () => {
   loginWin.on('closed', () => { loginWin = null; pushLoginStatus(); });
 });
 
-// —— 自动更新 —— //
-// Windows：electron-updater 全自动（后台下载→提示重启装好，未签名也能用）。
-// Mac：未签名无法走 Squirrel 静默更新，改为查 GitHub 最新版→应用内提示→一键打开下载页。
+// —— 自动更新（走国内 GitHub 加速镜像，免梯子）——
+// GitHub 在国内被墙，api.github.com / github.com 直连必失败。改为：
+//   1) 版本检测：拉发布里自带的 latest.yml(win)/latest-mac.yml(mac) 读 version，不碰被墙的 GitHub API；
+//   2) 全程走国内加速镜像逐个兜底；Windows 静默下载安装，失败则退化为浏览器下载代理直链。
 const UPDATE_OWNER = 'JinHe9527';
 const UPDATE_REPO = 'douyin-live-wall'; // 公开发布仓库（安装包所在）
-const UPDATE_RELEASES_URL = `https://github.com/${UPDATE_OWNER}/${UPDATE_REPO}/releases/latest`;
+const GH_BASE = `https://github.com/${UPDATE_OWNER}/${UPDATE_REPO}`;
+// 国内可直连的 GitHub 加速镜像，逐个尝试；最后一个空串=直连 GitHub(有梯子/海外时)。
+const GH_MIRRORS = ['https://gh-proxy.com/', 'https://ghfast.top/', 'https://ghproxy.net/', 'https://gh.llkk.cc/', ''];
 
 function cmpVer(a, b) { // a>b → 正数
   const pa = String(a).split('.').map((x) => parseInt(x, 10) || 0);
@@ -366,31 +374,70 @@ function cmpVer(a, b) { // a>b → 正数
 function infoBox(message, detail) {
   if (mainWin && !mainWin.isDestroyed()) dialog.showMessageBox(mainWin, { type: 'info', message, detail, buttons: ['好'] });
 }
-function fetchJson(url) {
+// electron net 拉文本，手动跟随重定向 + 超时（不要用 redirect:'follow' 选项，实测会卡死）
+function fetchText(url, timeoutMs = 12000) {
   return new Promise((resolve, reject) => {
-    const req = net.request({ url, headers: { Accept: 'application/vnd.github+json', 'User-Agent': UPDATE_REPO } });
+    let done = false, redirects = 0;
+    const req = net.request(url);
+    req.setHeader('User-Agent', UPDATE_REPO);
+    const to = setTimeout(() => { if (!done) { done = true; try { req.abort(); } catch { /* */ } reject(new Error('timeout')); } }, timeoutMs);
     let data = '';
-    req.on('response', (res) => {
-      if (res.statusCode >= 300) { reject(new Error('http ' + res.statusCode)); req.abort(); return; }
-      res.on('data', (c) => { data += c; });
-      res.on('end', () => { try { resolve(JSON.parse(data)); } catch (e) { reject(e); } });
+    req.on('redirect', (_s, _m, redirectUrl) => {
+      if (redirects++ < 5) { try { req.followRedirect(); } catch { /* */ } }
+      else if (!done) { done = true; clearTimeout(to); try { req.abort(); } catch { /* */ } reject(new Error('too-many-redirects')); }
     });
-    req.on('error', reject);
+    req.on('response', (res) => {
+      if (res.statusCode >= 400) { if (!done) { done = true; clearTimeout(to); reject(new Error('http ' + res.statusCode)); } try { req.abort(); } catch { /* */ } return; }
+      res.on('data', (c) => { data += c; });
+      res.on('end', () => { if (!done) { done = true; clearTimeout(to); resolve(data); } });
+    });
+    req.on('error', (e) => { if (!done) { done = true; clearTimeout(to); reject(e); } });
     req.end();
   });
 }
+function parseYmlVersion(t) { const m = /(^|\n)version:\s*([0-9.]+)/.exec(t || ''); return m ? m[2].trim() : ''; }
+
+// 逐个镜像拉 yml，第一个成功的返回 {mirror, version}
+async function pickMirror(ymlName) {
+  for (const m of GH_MIRRORS) {
+    try {
+      const ver = parseYmlVersion(await fetchText(`${m}${GH_BASE}/releases/latest/download/${ymlName}`));
+      if (ver) return { mirror: m, version: ver };
+    } catch { /* 换下一个镜像 */ }
+  }
+  return null;
+}
+
+let lastOfferedVersion = '';
+async function offerProxiedDownload(pick, plat) {
+  if (cmpVer(pick.version, app.getVersion()) <= 0) return;
+  if (lastOfferedVersion === pick.version) return; // 同一版本本次运行只弹一次
+  lastOfferedVersion = pick.version;
+  const file = plat === 'win'
+    ? `DouyinLiveWall-${pick.version}-win-x64.exe`
+    : `DouyinLiveWall-${pick.version}-mac-${process.arch === 'x64' ? 'x64' : 'arm64'}.dmg`;
+  const r = await dialog.showMessageBox(mainWin, {
+    type: 'info', defaultId: 0, cancelId: 1, buttons: ['前往下载', '稍后'],
+    message: `发现新版本 v${pick.version}`,
+    detail: `当前 v${app.getVersion()}。点「前往下载」通过国内加速通道下载（免梯子），下载后覆盖安装即可（设置会保留）。`,
+  });
+  if (r.response === 0) shell.openExternal(`${pick.mirror}${GH_BASE}/releases/download/v${pick.version}/${file}`);
+}
 
 let winUpdWired = false;
-function checkWinUpdate(manual) {
+async function checkWinUpdate(manual) {
   let autoUpdater;
   try { ({ autoUpdater } = require('electron-updater')); } catch { if (manual) infoBox('检查更新失败', '更新组件未就绪'); return; }
+  const pick = await pickMirror('latest.yml');
+  if (!pick) { if (manual) infoBox('检查更新失败', '网络无法访问更新服务器，请稍后重试'); return; }
+  checkWinUpdate._pick = pick;
+  checkWinUpdate._manual = manual;
   autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
-  checkWinUpdate._manual = manual;
+  try { autoUpdater.setFeedURL({ provider: 'generic', url: `${pick.mirror}${GH_BASE}/releases/latest/download` }); } catch { /* */ }
   if (!winUpdWired) {
     winUpdWired = true;
     autoUpdater.on('update-not-available', () => { if (checkWinUpdate._manual) infoBox('已是最新版本', `当前 v${app.getVersion()}`); });
-    autoUpdater.on('error', () => { if (checkWinUpdate._manual) infoBox('检查更新失败', '请稍后再试或手动到发布页下载'); });
     autoUpdater.on('update-downloaded', async (info) => {
       const r = await dialog.showMessageBox(mainWin, {
         type: 'info', defaultId: 0, cancelId: 1, buttons: ['立即重启更新', '稍后'],
@@ -399,26 +446,17 @@ function checkWinUpdate(manual) {
       });
       if (r.response === 0) setImmediate(() => autoUpdater.quitAndInstall());
     });
+    // 静默下载失败（多半是镜像不支持大文件断点续传）→ 退化为浏览器下载代理直链，仍免梯子
+    autoUpdater.on('error', () => { if (checkWinUpdate._pick) offerProxiedDownload(checkWinUpdate._pick, 'win'); });
   }
-  autoUpdater.checkForUpdates().catch(() => { if (manual) infoBox('检查更新失败', '请检查网络后重试'); });
+  autoUpdater.checkForUpdates().catch(() => { if (checkWinUpdate._pick) offerProxiedDownload(checkWinUpdate._pick, 'win'); });
 }
 
 async function checkMacUpdate(manual) {
-  try {
-    const j = await fetchJson(`https://api.github.com/repos/${UPDATE_OWNER}/${UPDATE_REPO}/releases/latest`);
-    const latest = String((j && j.tag_name) || '').replace(/^v/, '');
-    const cur = app.getVersion();
-    if (latest && cmpVer(latest, cur) > 0) {
-      const r = await dialog.showMessageBox(mainWin, {
-        type: 'info', defaultId: 0, cancelId: 1, buttons: ['前往下载', '稍后'],
-        message: `发现新版本 v${latest}`,
-        detail: `当前 v${cur}。点「前往下载」获取最新安装包，下载后覆盖安装即可（设置会保留）。`,
-      });
-      if (r.response === 0) shell.openExternal((j && j.html_url) || UPDATE_RELEASES_URL);
-    } else if (manual) {
-      infoBox('已是最新版本', `当前 v${cur}`);
-    }
-  } catch { if (manual) infoBox('检查更新失败', '请检查网络后重试'); }
+  const pick = await pickMirror('latest-mac.yml');
+  if (!pick) { if (manual) infoBox('检查更新失败', '网络无法访问更新服务器，请稍后重试'); return; }
+  if (cmpVer(pick.version, app.getVersion()) > 0) offerProxiedDownload(pick, 'mac');
+  else if (manual) infoBox('已是最新版本', `当前 v${app.getVersion()}`);
 }
 
 function checkForUpdate(manual) {
