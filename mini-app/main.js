@@ -437,9 +437,11 @@ async function pickMirror(ymlName) {
 }
 
 let lastOfferedVersion = '';
-async function offerProxiedDownload(pick, plat) {
+// force=true（手动点「检查更新」）：绕过"同一版本只弹一次"——手动检查必须永远有反馈，
+// 否则启动时自动弹过一次后，手动点就静默无反应，像坏了一样
+async function offerProxiedDownload(pick, plat, force) {
   if (cmpVer(pick.version, app.getVersion()) <= 0) return;
-  if (lastOfferedVersion === pick.version) return; // 同一版本本次运行只弹一次
+  if (!force && lastOfferedVersion === pick.version) return; // 自动检查：同一版本本次运行只弹一次
   lastOfferedVersion = pick.version;
   const file = plat === 'win'
     ? `DouyinLiveWall-${pick.version}-win-x64.exe`
@@ -466,6 +468,10 @@ async function checkWinUpdate(manual) {
   if (!winUpdWired) {
     winUpdWired = true;
     autoUpdater.on('update-not-available', () => { if (checkWinUpdate._manual) infoBox('已是最新版本', `当前 v${app.getVersion()}`); });
+    // 手动检查发现新版：立刻告知"正在后台下载"，否则静默下载几分钟像点了没反应
+    autoUpdater.on('update-available', (info) => {
+      if (checkWinUpdate._manual) infoBox(`发现新版本 v${(info && info.version) || ''}`, '正在通过国内加速通道后台下载，完成后会弹窗提示安装，请稍候（网络慢时可能需要几分钟）。');
+    });
     autoUpdater.on('update-downloaded', async (info) => {
       const r = await dialog.showMessageBox(mainWin, {
         type: 'info', defaultId: 0, cancelId: 1, buttons: ['立即重启更新', '稍后'],
@@ -475,15 +481,15 @@ async function checkWinUpdate(manual) {
       if (r.response === 0) setImmediate(() => autoUpdater.quitAndInstall());
     });
     // 静默下载失败（多半是镜像不支持大文件断点续传）→ 退化为浏览器下载代理直链，仍免梯子
-    autoUpdater.on('error', () => { if (checkWinUpdate._pick) offerProxiedDownload(checkWinUpdate._pick, 'win'); });
+    autoUpdater.on('error', () => { if (checkWinUpdate._pick) offerProxiedDownload(checkWinUpdate._pick, 'win', checkWinUpdate._manual); });
   }
-  autoUpdater.checkForUpdates().catch(() => { if (checkWinUpdate._pick) offerProxiedDownload(checkWinUpdate._pick, 'win'); });
+  autoUpdater.checkForUpdates().catch(() => { if (checkWinUpdate._pick) offerProxiedDownload(checkWinUpdate._pick, 'win', checkWinUpdate._manual); });
 }
 
 async function checkMacUpdate(manual) {
   const pick = await pickMirror('latest-mac.yml');
   if (!pick) { if (manual) infoBox('检查更新失败', '网络无法访问更新服务器，请稍后重试'); return; }
-  if (cmpVer(pick.version, app.getVersion()) > 0) offerProxiedDownload(pick, 'mac');
+  if (cmpVer(pick.version, app.getVersion()) > 0) offerProxiedDownload(pick, 'mac', manual);
   else if (manual) infoBox('已是最新版本', `当前 v${app.getVersion()}`);
 }
 
