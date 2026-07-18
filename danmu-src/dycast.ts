@@ -893,14 +893,6 @@ export class DyCast {
           data.method = CastMethod.ROOM_STATS;
           data.room = { audienceCount: message.displayMiddle };
           break;
-        case CastMethod.IN_ROOM_BANNER: {
-          // 字段2 = 明文 JSON（含 giftwall_mission_group_live 等活动横幅：进度条/血条数据）
-          const jsonBuf = pbSub(pbWalk(payload), 2);
-          if (!jsonBuf) return null;
-          data.method = CastMethod.IN_ROOM_BANNER;
-          data.content = pbText.decode(jsonBuf);
-          break;
-        }
         case CastMethod.GROUP_MEMBER_CHANGE: {
           // 字段2(repeated) = 成员条目：f1=用户(f3=昵称)、f2=实时分数、f4.f1=状态文本(如"表演中")
           const members: { name: string; score: string; status: string }[] = [];

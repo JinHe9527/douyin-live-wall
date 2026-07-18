@@ -410,7 +410,7 @@ function cellTemplate(room) {
       <div class="cell-gifts"></div>
       <div class="cell-video"><video playsinline muted></video></div>
       <div class="cell-comments"></div>
-      <div class="cell-battle"><div class="battle-bars"></div><div class="battle-members"></div></div>
+      <div class="cell-battle"><div class="battle-members"></div></div>
     </div>
     <div class="cell-status" data-state="loading">
       <div class="cell-spinner"></div>
@@ -759,7 +759,6 @@ function handleDanmu(payload) {
   for (const it of payload.items) {
     if (it.type === 'online') { updateOnlineCell(cell, payload.rid, it.online); continue; }
     if (it.type === 'gift') { if (state.showGifts) appendGift(cell, it); continue; }
-    if (it.type === 'battle') { if (state.showBattle) renderBattleBars(cell, it.bars); continue; }
     if (it.type === 'members') { if (state.showBattle) renderBattleMembers(cell, it.list); continue; }
     if (it.type === 'rank') continue; // 左侧留给实时礼物，贡献榜不再叠加
     if (!state.showDanmu) continue;
@@ -794,19 +793,6 @@ function buildCommentLine(it) {
   c.textContent = it.content || (it.type === 'join' ? '来了' : '');
   line.appendChild(c);
   return line;
-}
-
-// 比赛战况：任务/展馆进度血条（整块替换渲染，来一帧画一帧，天然实时）
-function renderBattleBars(cell, bars) {
-  const panel = cell.querySelector('.battle-bars');
-  if (!panel || !Array.isArray(bars)) return;
-  panel.innerHTML = bars.map((b) => {
-    const pct = b.target > 0 ? Math.min(100, Math.round((b.cur / b.target) * 100)) : 0;
-    const label = b.sub ? `${b.text} · ${b.sub}` : b.text;
-    return `<div class="bbar"><div class="bbar-fill" style="width:${pct}%"></div>`
-      + `<span class="bbar-label">${escapeHtml(label)}</span>`
-      + `<span class="bbar-num">${b.target > 0 ? `${b.cur}/${b.target}` : b.cur}</span></div>`;
-  }).join('');
 }
 
 // 比赛战况：团播成员实时分数 + 状态（表演中/冲刺中等，有状态就高亮）
@@ -989,9 +975,9 @@ function applyOverlayToggles() {
   if (btnBattle) btnBattle.classList.toggle('active', !!state.showBattle);
   if (!state.showDanmu) gridEl.querySelectorAll('.cell-comments').forEach((p) => { p.textContent = ''; });
   if (!state.showGifts) gridEl.querySelectorAll('.cell-gifts').forEach((p) => { p.textContent = ''; });
-  if (!state.showBattle) gridEl.querySelectorAll('.battle-bars, .battle-members').forEach((p) => { p.textContent = ''; });
+  if (!state.showBattle) gridEl.querySelectorAll('.battle-members').forEach((p) => { p.textContent = ''; });
 }
-function wireOverlayToggle(btn, key, onMsg, offMsg) {
+function wireOverlayToggle(btn, key, onMsg, offMsg, onEnable) {
   if (!btn) return;
   btn.addEventListener('click', () => {
     state[key] = !state[key];
@@ -999,10 +985,16 @@ function wireOverlayToggle(btn, key, onMsg, offMsg) {
     syncInfoMode();
     persist();
     toast(state[key] ? onMsg : offMsg);
+    if (state[key] && onEnable) onEnable();
   });
 }
 wireOverlayToggle(btnDanmu, 'showDanmu', '实时弹幕已开（画面右侧）', '实时弹幕已关');
-wireOverlayToggle(btnGifts, 'showGifts', '实时礼物已开（画面左侧）', '实时礼物已关');
+wireOverlayToggle(btnGifts, 'showGifts', '实时礼物已开（画面左侧）', '实时礼物已关', () => {
+  // 抖音只对登录用户的弹幕连接推送礼物消息（弹幕/点赞/进场不受影响）→ 没登录明确告知，不让人以为坏了
+  window.mini.getLoginStatus().then((ok) => {
+    if (!ok) toast('抖音只给登录用户推送礼物消息：请点右上 ⚙ →「扫码登录抖音」，登录后礼物才会显示', 6000);
+  }).catch(() => {});
+});
 wireOverlayToggle(btnBattle, 'showBattle', '比赛战况已开（画面上部，等比赛数据推送）', '比赛战况已关');
 window.mini.onDanmu(handleDanmu);
 
