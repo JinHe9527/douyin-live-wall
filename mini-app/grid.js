@@ -996,7 +996,11 @@ wireOverlayToggle(btnGifts, 'showGifts', '实时礼物已开（画面左侧）',
   }).catch(() => {});
 });
 wireOverlayToggle(btnBattle, 'showBattle', '比赛战况已开（画面上部，等比赛数据推送）', '比赛战况已关');
-window.mini.onDanmu(handleDanmu);
+// 攒批弹幕：一包多房间，一个 rAF 内全部渲染完，8+ 房间同时刷也只触发一次布局
+window.mini.onDanmuBatch((map) => {
+  if (!map) return;
+  for (const rid in map) handleDanmu({ rid, items: map[rid] });
+});
 
 // 只看在播开关
 const btnLiveOnly = document.getElementById('btn-live-only');

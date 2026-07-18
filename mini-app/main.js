@@ -231,14 +231,23 @@ function ensureDanmuHub() {
     danmuHub.webContents.setUserAgent(DESKTOP_UA);
     danmuHub.webContents.setAudioMuted(true);
     blockMediaIn(danmuHub); // 弹幕枢纽只要 WS+签名，不准拉视频流
+    // 弹幕枢纽 → 主界面的桥。console-message 经 devtools 协议，高频下很重（8+房间比赛弹幕洪流会把弱机拖垮），
+    // 所以页面内已攒批：每 ~300ms 把所有房间的弹幕合成 ONE 条 'DMB::{rid:items[]}' 发过来，这里一次解析、一次 IPC。
     danmuHub.webContents.on('console-message', (_e, _l, message) => {
+      if (message.startsWith('DMB::')) {
+        let map;
+        try { map = JSON.parse(message.slice(5)); } catch { return; }
+        if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('danmu-batch', map);
+        return;
+      }
+      // 兼容旧 spike 脚本的逐条 DM:: 格式（正式管线已不用）
       if (!message.startsWith('DM::')) return;
       const i1 = message.indexOf('::', 4);
       if (i1 < 0) return;
       const rid = message.slice(4, i1);
       let items;
       try { items = JSON.parse(message.slice(i1 + 2)); } catch { return; }
-      if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('danmu', { rid, items });
+      if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('danmu-batch', { [rid]: items });
     });
     await waitLoad(danmuHub, 'https://live.douyin.com/');
     keepMediaPaused(danmuHub);
@@ -251,8 +260,10 @@ function ensureDanmuHub() {
       await new Promise((r) => setTimeout(r, 500));
     }
     await danmuHub.webContents.executeJavaScript(DANMU_BUNDLE).catch(() => {});
+    // 攒批发送：把每个房间的弹幕缓存起来，每 300ms 合成一包 console.log 一次，
+    // 把跨进程事件数从"每秒几百条"降到"每秒 ~3 次"。每房间每批只留最近 40 条，防洪流堆积。
     await danmuHub.webContents.executeJavaScript(
-      "window.__dyEmit=function(id,items){console.log('DM::'+id+'::'+JSON.stringify(items));};window.__dyStatus=function(){};true;"
+      "(function(){var buf={},scheduled=false;function flush(){scheduled=false;var ks=Object.keys(buf);if(!ks.length)return;var p=buf;buf={};try{console.log('DMB::'+JSON.stringify(p));}catch(e){}}window.__dyEmit=function(id,items){if(!items||!items.length)return;var a=buf[id]||(buf[id]=[]);for(var i=0;i<items.length;i++)a.push(items[i]);if(a.length>40)buf[id]=a.slice(a.length-40);if(!scheduled){scheduled=true;setTimeout(flush,300);}};window.__dyStatus=function(){};})();true;"
     ).catch(() => {});
   })();
   return danmuHubReady;
