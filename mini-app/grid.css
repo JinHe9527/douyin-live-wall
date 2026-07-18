@@ -42,20 +42,8 @@ html, body {
 .topbar input,
 .topbar select { -webkit-app-region: no-drag; }
 
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 14px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  white-space: nowrap;
-  padding-left: 64px; /* 给 mac 红绿灯让位 */
-}
-.brand-dot {
-  width: 8px; height: 8px; border-radius: 50%;
-  background: var(--live); box-shadow: 0 0 8px var(--live);
-}
+/* 品牌标题已去掉；mac 隐藏标题栏的红绿灯让位改由 topbar 左内边距承担（grid.js 按平台加 class） */
+body.platform-mac .topbar { padding-left: 76px; }
 
 .add-box {
   flex: 1;
@@ -171,31 +159,34 @@ html, body {
 }
 .cell-online { flex: none; color: #ff7a8a; text-shadow: 0 1px 2px rgba(0, 0, 0, .9); }
 
-/* 左上：贡献榜（真实 top 送礼人） */
+/* 左侧：实时礼物滚动流（送礼人+礼物+数量，底部对齐向上顶） */
 .cell-gifts {
   position: absolute;
-  top: 30px; left: 6px;
-  display: none;
-  flex-direction: column;
-  gap: 1px;
-  max-width: 44%;
-  padding: 5px 7px;
-  background: rgba(0, 0, 0, .42);
-  border-radius: 8px;
-  font-size: 11px;
-  z-index: 3;
-  pointer-events: none;
-}
-/* 底部：评论滚动（盖在画面上，像直播间一样） */
-.cell-comments {
-  position: absolute;
-  left: 6px; bottom: 6px;
+  left: 6px; bottom: 34px;
   display: none;
   flex-direction: column;
   justify-content: flex-end;
   gap: 2px;
-  width: 64%;
-  max-height: 48%;
+  width: 46%;
+  max-height: 52%;
+  overflow: hidden;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: linear-gradient(0deg, rgba(0, 0, 0, .42), transparent);
+  font-size: 11px;
+  z-index: 3;
+  pointer-events: none;
+}
+/* 右侧：实时弹幕滚动流（评论/进场，底部对齐向上顶） */
+.cell-comments {
+  position: absolute;
+  right: 6px; bottom: 34px;
+  display: none;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 2px;
+  width: 46%;
+  max-height: 52%;
   overflow: hidden;
   padding: 6px 8px;
   border-radius: 8px;
@@ -205,10 +196,54 @@ html, body {
   z-index: 3;
   pointer-events: none;
 }
-/* 该格开了信息 → 显示叠层 */
-.cell.show-info .cell-infobar,
-.cell.show-info .cell-gifts,
-.cell.show-info .cell-comments { display: flex; }
+/* 顶栏开关控制叠层显隐：弹幕→右侧，礼物→左侧，战况→上部 */
+.grid.show-danmu .cell-comments { display: flex; }
+.grid.show-gifts .cell-gifts { display: flex; }
+.grid.show-battle .cell-battle { display: flex; }
+
+/* 上部：比赛战况（任务/展馆进度血条 + 团播成员分数状态） */
+.cell-battle {
+  position: absolute;
+  top: 46px; left: 6px; right: 6px;
+  display: none;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 10px;
+  z-index: 3;
+  pointer-events: none;
+}
+.battle-bars { display: flex; flex-direction: column; gap: 2px; }
+.battle-bars:empty, .battle-members:empty { display: none; }
+.bbar {
+  position: relative;
+  height: 15px; border-radius: 4px; overflow: hidden;
+  background: rgba(0, 0, 0, .5);
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 6px; padding: 0 6px;
+}
+.bbar-fill {
+  position: absolute; top: 0; bottom: 0; left: 0;
+  background: linear-gradient(90deg, rgba(255, 90, 120, .85), rgba(255, 159, 107, .85));
+  transition: width .4s ease; /* 数值变化时血条平滑推进 */
+}
+.bbar-label, .bbar-num {
+  position: relative; z-index: 1;
+  color: #fff; text-shadow: 0 1px 2px rgba(0, 0, 0, .85);
+  white-space: nowrap;
+}
+.bbar-label { overflow: hidden; text-overflow: ellipsis; }
+.bbar-num { font-variant-numeric: tabular-nums; }
+.battle-members {
+  display: flex; flex-direction: column; gap: 1px;
+  padding: 3px 6px;
+  background: rgba(0, 0, 0, .42);
+  border-radius: 6px;
+}
+.bm-line { display: flex; align-items: center; gap: 5px; color: #dfe5ee; text-shadow: 0 1px 2px rgba(0, 0, 0, .85); }
+.bm-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bm-status { color: #9aa4b2; flex: none; }
+.bm-on .bm-name, .bm-on .bm-status { color: #7cffb3; } /* 表演中高亮 */
+.bm-score { color: #ffd28a; font-variant-numeric: tabular-nums; flex: none; }
 
 /* 弹幕行 */
 .dm-line {
@@ -224,25 +259,15 @@ html, body {
 .dm-like { color: #9aa4b2; }
 .dm-social { color: #9ad0a0; }
 
-/* 贡献榜（左面板） */
-.rank-title {
-  color: #ffd28a; font-weight: 600;
-  padding: 0 0 2px;
+/* 礼物行（左面板） */
+.gift-line {
+  word-break: break-word;
   text-shadow: 0 1px 3px rgba(0, 0, 0, .95);
+  animation: dmIn .18s ease;
 }
-.rank-line {
-  display: flex; align-items: center; gap: 5px;
-  padding: 1px 0;
-  text-shadow: 0 1px 3px rgba(0, 0, 0, .95);
-}
-.rank-no {
-  flex: none; width: 14px; text-align: center;
-  color: #ff9f6b; font-weight: 600;
-}
-.rank-name {
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  color: #eef2f7;
-}
+.gift-user { color: #ffd28a; }
+.gift-name { color: #f0f3f8; }
+.gift-count { color: #ff9f6b; font-weight: 700; }
 
 /* 状态遮罩 */
 .cell-status {
@@ -271,28 +296,30 @@ html, body {
 @keyframes spin { to { transform: rotate(360deg); } }
 
 /* 顶部信息条 */
+/* 上下结构：第一行名字整行显示(不被指标挤成省略号)，指标在下方自动换行 —— 窄格子里两者都完整可读 */
 .cell-hud {
   position: absolute; top: 0; left: 0; right: 0;
-  display: flex; align-items: center; justify-content: space-between;
-  gap: 8px; padding: 7px 9px;
-  background: linear-gradient(180deg, rgba(0,0,0,.6), transparent);
+  display: flex; flex-direction: column; align-items: stretch;
+  gap: 2px; padding: 7px 9px;
+  background: linear-gradient(180deg, rgba(0,0,0,.66), rgba(0,0,0,.3) 65%, transparent);
   font-size: 12px;
   opacity: 0; transition: opacity .2s; pointer-events: none;
 }
 .cell:hover .cell-hud { opacity: 1; }
 .grid.hud-always .cell-hud { opacity: 1; } /* 常驻显示：名字/分辨率/帧率/码率一直显示 */
-.cell-hud-left { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.cell-hud-left { display: flex; align-items: center; gap: 6px; min-width: 0; flex: none; }
 .cell-live-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--live); box-shadow: 0 0 6px var(--live); flex: none; }
 .cell-title {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   text-shadow: 0 1px 2px rgba(0,0,0,.85);
 }
 .cell-stats {
-  flex: none;
+  /* 信息含 在线·分辨率·帧率·标称码率·↓本地速度，窄格子一行放不下 → 在指标间自动换行 */
   color: rgba(255,255,255,.92);
   text-shadow: 0 1px 2px rgba(0,0,0,.9);
   font-variant-numeric: tabular-nums;
-  white-space: nowrap;
+  white-space: normal;
+  line-height: 1.5;
   font-size: 11px;
 }
 .cell-count { flex: none; color: rgba(255,255,255,.85); text-shadow: 0 1px 2px rgba(0,0,0,.85); }
@@ -424,6 +451,19 @@ html, body {
   font-size: 13px; color: var(--fg);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+/* 名字可编辑：平时长得像纯文本，悬停/聚焦才显出输入框 */
+.lib-name-edit {
+  width: 100%; box-sizing: border-box;
+  height: 24px; padding: 0 6px; margin-left: -6px;
+  font-size: 13px; color: var(--fg);
+  background: transparent;
+  border: 1px solid transparent; border-radius: 6px;
+  outline: none;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.lib-row:hover .lib-name-edit { border-color: var(--border); background: var(--panel); }
+.lib-name-edit:focus { border-color: var(--accent-2); background: var(--panel); }
+.lib-name-edit::placeholder { color: var(--muted); }
 .lib-meta {
   font-size: 11px; color: var(--muted);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;

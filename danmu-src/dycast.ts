@@ -146,6 +146,56 @@ export interface DyMessage {
   rtfContent?: CastRtfContent[];
   room?: LiveRoom;
   rank?: LiveRankItem[];
+  /** 团播成员战况（GroupLiveMemberChange）：名字/分数/状态(表演中等) */
+  members?: { name: string; score: string; status: string }[];
+}
+
+// 已有解码逻辑的 method 集合（诊断钩子用：不在此集合的消息会被抓原始 payload 供分析）
+const KNOWN_CAST_METHODS = new Set([
+  'WebcastChatMessage', 'WebcastGiftMessage', 'WebcastLikeMessage', 'WebcastMemberMessage',
+  'WebcastSocialMessage', 'WebcastRoomUserSeqMessage', 'WebcastControlMessage', 'WebcastRoomRankMessage',
+  'WebcastRoomStatsMessage', 'WebcastEmojiChatMessage', 'WebcastFansclubMessage', 'WebcastRoomDataSyncMessage',
+  'WebcastInRoomBannerMessage', 'WebcastGroupLiveMemberChangeMessage'
+]);
+
+// —— 极简 protobuf 走读（无 schema）——
+// 团播战况类消息（房间横幅/成员变化）没有完整 proto 定义，但需要的字段很浅：
+// 走一遍 wire format 把顶层字段拆出来即可（wire0=varint、wire2=子串/子消息）。
+interface PbField { f: number; w: number; v: string | Uint8Array | null }
+function pbWalk(buf: Uint8Array): PbField[] {
+  const out: PbField[] = [];
+  let pos = 0;
+  const varint = (): bigint => {
+    let r = 0n, s = 0n;
+    while (pos < buf.length) {
+      const b = BigInt(buf[pos++]);
+      r |= (b & 0x7fn) << s;
+      if (!(b & 0x80n)) return r;
+      s += 7n;
+      if (s > 70n) throw new Error('varint-too-long');
+    }
+    throw new Error('eof');
+  };
+  while (pos < buf.length) {
+    const tag = varint();
+    const f = Number(tag >> 3n), w = Number(tag & 7n);
+    if (f <= 0 || f > 100000) throw new Error('bad-field');
+    if (w === 0) out.push({ f, w, v: varint().toString() });
+    else if (w === 2) {
+      const len = Number(varint());
+      if (len < 0 || pos + len > buf.length) throw new Error('bad-len');
+      out.push({ f, w, v: buf.subarray(pos, pos + len) });
+      pos += len;
+    } else if (w === 5) { pos += 4; out.push({ f, w, v: null }); }
+    else if (w === 1) { pos += 8; out.push({ f, w, v: null }); }
+    else throw new Error('bad-wire');
+  }
+  return out;
+}
+const pbText = new TextDecoder();
+function pbSub(fields: PbField[], f: number): Uint8Array | null {
+  const hit = fields.find((x) => x.f === f && x.w === 2);
+  return hit ? (hit.v as Uint8Array) : null;
 }
 
 export enum CastMethod {
@@ -161,6 +211,10 @@ export enum CastMethod {
   EMOJI_CHAT = 'WebcastEmojiChatMessage',
   FANSCLUB = 'WebcastFansclubMessage',
   ROOM_DATA_SYNC = 'WebcastRoomDataSyncMessage',
+  /** 房间横幅（团播比赛任务进度/血条数据藏在这里，字段2=明文JSON） */
+  IN_ROOM_BANNER = 'WebcastInRoomBannerMessage',
+  /** 团播成员变化（成员名/实时分数/表演中状态） */
+  GROUP_MEMBER_CHANGE = 'WebcastGroupLiveMemberChangeMessage',
   /** 自定义消息 */
   CUSTOM = 'CustomMessage'
 }
@@ -753,6 +807,25 @@ export class DyCast {
     let message = null;
     let payload = msg.payload;
     if (!payload) return null;
+    // 诊断钩子：window.__mc 统计所有原始 method 出现次数；未识别的 method 抓最近一帧
+    // payload(base64) 到 window.__mraw —— 用于发现比赛血条/战况这类还没有 proto 定义的新消息。
+    try {
+      const w: any = typeof window !== 'undefined' ? window : null;
+      if (w) {
+        const key = method || 'unknown';
+        (w.__mc = w.__mc || {})[key] = ((w.__mc[key] || 0) + 1);
+        if (method && !KNOWN_CAST_METHODS.has(method)) {
+          w.__mraw = w.__mraw || {};
+          if (payload.length < 60000 && Object.keys(w.__mraw).length < 80) {
+            let bin = '';
+            for (let i = 0; i < payload.length; i += 8192) {
+              bin += String.fromCharCode.apply(null, payload.subarray(i, i + 8192) as unknown as number[]);
+            }
+            w.__mraw[method] = btoa(bin);
+          }
+        }
+      }
+    } catch (e) { /* 诊断失败不影响正常解码 */ }
     try {
       // 处理消息
       switch (method) {
@@ -820,6 +893,41 @@ export class DyCast {
           data.method = CastMethod.ROOM_STATS;
           data.room = { audienceCount: message.displayMiddle };
           break;
+        case CastMethod.IN_ROOM_BANNER: {
+          // 字段2 = 明文 JSON（含 giftwall_mission_group_live 等活动横幅：进度条/血条数据）
+          const jsonBuf = pbSub(pbWalk(payload), 2);
+          if (!jsonBuf) return null;
+          data.method = CastMethod.IN_ROOM_BANNER;
+          data.content = pbText.decode(jsonBuf);
+          break;
+        }
+        case CastMethod.GROUP_MEMBER_CHANGE: {
+          // 字段2(repeated) = 成员条目：f1=用户(f3=昵称)、f2=实时分数、f4.f1=状态文本(如"表演中")
+          const members: { name: string; score: string; status: string }[] = [];
+          for (const entry of pbWalk(payload).filter((x) => x.f === 2 && x.w === 2)) {
+            try {
+              const sub = pbWalk(entry.v as Uint8Array);
+              let name = '';
+              const userBuf = pbSub(sub, 1);
+              if (userBuf) {
+                const nameBuf = pbSub(pbWalk(userBuf), 3);
+                if (nameBuf) name = pbText.decode(nameBuf);
+              }
+              const scoreField = sub.find((x) => x.f === 2 && x.w === 0);
+              let status = '';
+              const stBuf = pbSub(sub, 4);
+              if (stBuf) {
+                const stTextBuf = pbSub(pbWalk(stBuf), 1);
+                if (stTextBuf) status = pbText.decode(stTextBuf);
+              }
+              if (name) members.push({ name, score: scoreField ? String(scoreField.v) : '', status });
+            } catch (e) { /* 单个成员坏了不影响其它 */ }
+          }
+          if (!members.length) return null;
+          data.method = CastMethod.GROUP_MEMBER_CHANGE;
+          data.members = members;
+          break;
+        }
       }
       if (!data.method) return null;
     } catch (err) {

@@ -47,7 +47,9 @@ const state = {
   rooms: [],     // 上墙(播放中) [{ id, name, brand, url, kind, webRid, title, anchor, count, flvUrl, status, quality }]
   cols: 'auto',
   soloId: null,
-  infoMode: false,
+  showDanmu: false,      // 实时弹幕叠在画面右侧（默认关，开了才连弹幕 WS）
+  showGifts: false,      // 实时礼物叠在画面左侧（默认关）
+  showBattle: false,     // 比赛战况（血条/成员分数）叠在画面上部（默认关）
   globalQuality: 'auto', // auto | origin | hd | sd | fluent
   hudAlways: false,      // 名字/分辨率/帧率/码率 是否常驻显示
   liveOnly: false,       // 只显示当前在播（已下播/未开播的自动隐藏，其余格子铺满整墙）
@@ -136,7 +138,7 @@ class LivePlayer {
     if (t && text != null) t.textContent = text;
     // 非直播状态：清掉在线/分辨率/帧率/码率 + 红点（下播了就不显示这些）
     const live = stateName === 'live';
-    if (!live) { this.room.stats = {}; this.room.count = ''; }
+    if (!live) { this.room.stats = {}; this.room.src = null; this.room.count = ''; }
     this.updateStats();
     const cell = gridEl.querySelector(`.cell[data-id="${this.room.id}"]`);
     if (cell) {
@@ -148,6 +150,9 @@ class LivePlayer {
   }
 
   // 悬停浮层：在线人数 · 分辨率 · 帧率 · 码率
+  // 分辨率/帧率/码率一律优先用「源流标称值」(room.src，来自房间接口 sdk_params，主播推什么就是什么)，
+  // 不受本地拉流档位/带宽/解码性能影响；标称缺失时才退回所拉流自带的元数据(st.*，仍是流声明值，非本地实测)。
+  // ↓ 后面的数字才是本地实际拉流速度 —— 远低于标称码率 = 本地网络/机器扛不住的健康信号。
   updateStats() {
     if (this.destroyed) return;
     const cell = gridEl.querySelector(`.cell[data-id="${this.room.id}"]`);
@@ -155,11 +160,17 @@ class LivePlayer {
     const el = cell.querySelector('.cell-stats');
     if (!el) return;
     const st = this.room.stats || {};
+    const src = this.room.src || {};
+    const fmtRate = (kbps) => (kbps >= 1000 ? `${(kbps / 1000).toFixed(1)}Mbps` : `${kbps}kbps`);
     const parts = [];
     if (this.room.count) parts.push(`${this.room.count} 在线`);
-    if (st.w && st.h) parts.push(`${st.w}×${st.h}`);
-    if (st.fps) parts.push(`${st.fps}fps`);
-    if (st.kbps) parts.push(st.kbps >= 1000 ? `${(st.kbps / 1000).toFixed(1)}Mbps` : `${st.kbps}kbps`);
+    const w = src.w || st.w, h = src.h || st.h;
+    if (w && h) parts.push(`${w}×${h}`);
+    const fps = src.fps || st.fps;
+    if (fps) parts.push(`${fps}fps`);
+    const kbps = src.kbps || st.metaKbps;
+    if (kbps) parts.push(fmtRate(kbps));
+    if (st.downKbps) parts.push(`↓${fmtRate(st.downKbps)}`);
     el.textContent = parts.join(' · ');
   }
 
@@ -197,18 +208,20 @@ class LivePlayer {
       }
     );
     player.on(window.mpegts.Events.ERROR, (type, detail) => this.recover(`mpegts:${type}:${detail}`));
-    // 分辨率(精确) + 标称帧率(仅作实测就绪前的兜底显示)
+    // 兜底元数据：所拉那档流自带的声明值（分辨率/标称帧率/编码码率）。
+    // 只在房间接口没给源流标称值(room.src)时才展示 —— 它反映的是本地拉的档位，不是源流。
     player.on(window.mpegts.Events.MEDIA_INFO, (mi) => {
       if (!this.room.stats) this.room.stats = {};
       this.room.stats.w = mi.width || this.room.stats.w || 0;
       this.room.stats.h = mi.height || this.room.stats.h || 0;
-      if (mi.fps && !this.room.stats.fpsReal) this.room.stats.fps = Math.round(mi.fps); // 实测帧率一旦就绪就不再被标称值覆盖
+      if (mi.fps) this.room.stats.fps = Math.round(mi.fps);
+      const rate = (Number(mi.videoDataRate) || 0) + (Number(mi.audioDataRate) || 0);
+      if (rate > 0) this.room.stats.metaKbps = Math.round(rate);
       this.updateStats();
     });
-    // 真实帧率/码率：全部用累计计数器在 5s 滚动窗口上实测，避免瞬时突发导致的跳动
-    // - decodedFrames = 实际解码总帧数(getVideoPlaybackQuality)，Δ帧/Δ时 = 真实帧率
-    // - s.speed = 上一秒下载 KB/s(突发)，对时间积分得累计接收字节，Δ字节/Δ时 = 真实交付码率
-    this._statWin = [];       // [{t, frames, kb}]
+    // 本地拉流速度(↓)：s.speed = 上一秒下载 KB/s(突发)，积分成累计字节后在 5s 滚动窗口取均值。
+    // 这是"送达本机"的速率，受本地带宽/多路抢带宽影响 —— 只作健康信号展示，不当直播间码率。
+    this._statWin = [];       // [{t, kb}]
     this._cumKB = 0;          // 累计已接收 KB
     this._lastSpeedTs = 0;
     const STAT_WINDOW_MS = 5000;
@@ -224,18 +237,13 @@ class LivePlayer {
         }
         this._lastSpeedTs = now;
       }
-      const frames = (typeof s.decodedFrames === 'number') ? s.decodedFrames : null;
-      this._statWin.push({ t: now, frames, kb: this._cumKB });
+      this._statWin.push({ t: now, kb: this._cumKB });
       while (this._statWin.length > 2 && now - this._statWin[0].t > STAT_WINDOW_MS) this._statWin.shift();
       const first = this._statWin[0];
       const span = (now - first.t) / 1000;
-      if (span >= 1.5) { // 窗口够长才输出，保证平滑真实
+      if (span >= 1.5) { // 窗口够长才输出，保证平滑
         const dKB = this._cumKB - first.kb;
-        this.room.stats.kbps = Math.max(0, Math.round((dKB * 8) / span)); // KB×8/s = kbps(真实交付码率)
-        if (frames != null && first.frames != null && frames - first.frames >= 0) {
-          this.room.stats.fps = Math.round((frames - first.frames) / span); // 真实解码帧率
-          this.room.stats.fpsReal = true;
-        }
+        this.room.stats.downKbps = Math.max(0, Math.round((dKB * 8) / span)); // KB×8/s = kbps(本地实际拉流速度)
       }
       this.updateStats();
     });
@@ -269,6 +277,7 @@ class LivePlayer {
         if (res.title) this.room.title = res.title;
         if (res.anchorName) this.room.anchor = res.anchorName;
         if (res.userCount) this.room.count = res.userCount;
+        if (res.srcMeta && Object.keys(res.srcMeta).length) this.room.src = res.srcMeta; // 源流标称参数（与本地无关）
         updateCellMeta(this.room);
         this.updateStats();
         syncInfoMode();
@@ -401,6 +410,7 @@ function cellTemplate(room) {
       <div class="cell-gifts"></div>
       <div class="cell-video"><video playsinline muted></video></div>
       <div class="cell-comments"></div>
+      <div class="cell-battle"><div class="battle-bars"></div><div class="battle-members"></div></div>
     </div>
     <div class="cell-status" data-state="loading">
       <div class="cell-spinner"></div>
@@ -509,27 +519,62 @@ function removeFromLibrary(id) {
 
 function isOnWall(libId) { return state.rooms.some((r) => r.id === libId); }
 
-function putOnWall(libId, opts = {}) {
-  if (isOnWall(libId)) return;
-  const lib = findLib(libId);
-  if (!lib) return;
-  const room = {
+// 增量加一个格子：只建这一格的 DOM+播放器，其它在播的格子完全不动。
+// （以前是整墙销毁重建 → 加/减一个间导致所有间同时断流重连，CPU 瞬间打爆，正在看的画面全黑一轮）
+function addCellForRoom(room, delayMs = 0) {
+  emptyHint.hidden = true;
+  gridEl.insertAdjacentHTML('beforeend', cellTemplate(room));
+  const cell = gridEl.querySelector(`.cell[data-id="${room.id}"]`);
+  if (!cell) return;
+  const lp = new LivePlayer(cell.querySelector('video'), cell.querySelector('.cell-status'), room);
+  players.set(room.id, lp);
+  applyLayout();
+  applyAudioSolo();
+  if (delayMs > 0) {
+    lp.setState('loading', '排队加载…');
+    setTimeout(() => { if (!lp.destroyed) lp.start(room.flvUrl || ''); }, delayMs);
+  } else {
+    lp.start(room.flvUrl || '');
+  }
+  if (state.liveOnly) applyLiveOnly();
+}
+
+function makeRoom(lib) {
+  return {
     id: lib.id, name: lib.name, brand: lib.brand, url: lib.url, kind: lib.kind,
     webRid: '', title: '', anchor: '', count: '', flvUrl: '', status: 'loading',
     quality: savedQuality[lib.id] || '',
   };
-  state.rooms.push(room);
-  if (!opts.noRender) { persist(); renderGrid(); renderLibList(); }
 }
 
+function putOnWall(libId, opts = {}) {
+  if (isOnWall(libId)) return;
+  const lib = findLib(libId);
+  if (!lib) return;
+  const room = makeRoom(lib);
+  state.rooms.push(room);
+  if (!opts.noRender) {
+    persist();
+    addCellForRoom(room);
+    renderLibList();
+    syncInfoMode();
+  }
+}
+
+// 增量删一个格子：销毁这格播放器 + 移除 DOM，其它格子照常播。
 function takeOffWall(libId) {
   const lp = players.get(libId);
   if (lp) { lp.destroy(); players.delete(libId); }
   state.rooms = state.rooms.filter((r) => r.id !== libId);
   if (state.soloId === libId) state.soloId = null;
+  const cell = gridEl.querySelector(`.cell[data-id="${libId}"]`);
+  if (cell) cell.remove();
+  emptyHint.hidden = state.rooms.length > 0;
   persist();
-  renderGrid();
+  applyLayout();
   renderLibList();
+  syncInfoMode();
+  if (state.liveOnly) applyLiveOnly();
 }
 
 function toggleWall(libId) {
@@ -588,7 +633,7 @@ function renderLibList() {
       <div class="lib-row" data-id="${it.id}">
         <input type="checkbox" class="lib-check" data-id="${it.id}" ${checked} />
         <div class="lib-info">
-          <div class="lib-name">${escapeHtml(it.name || it.url)}</div>
+          <input class="lib-name-edit" data-id="${it.id}" value="${escapeHtml(it.name || '')}" placeholder="${escapeHtml(it.url)}" title="改名字（回车或点别处生效）" />
           <div class="lib-meta"><span class="lib-kind ${it.kind}">${kindLabel}</span>${escapeHtml(it.url)}</div>
         </div>
         <input class="lib-group-edit" data-id="${it.id}" list="group-list" value="${escapeHtml(it.brand || '')}" placeholder="分组" title="改分组" />
@@ -616,6 +661,16 @@ function setBrand(id, brand) {
   if (room) room.brand = lib.brand;
   persist();
   renderLibList();
+}
+
+// 改名字：库和墙上格子同步更新（清空则回落显示直播间标题/主播名）
+function setName(id, name) {
+  const lib = findLib(id);
+  if (!lib) return;
+  lib.name = String(name || '').trim();
+  const room = state.rooms.find((r) => r.id === id);
+  if (room) { room.name = lib.name; updateCellMeta(room); }
+  persist();
 }
 
 // —— 操作：宫格控件 —— //
@@ -651,8 +706,11 @@ function fullscreenCell(id) {
 function wallRids() {
   return state.rooms.map((r) => r.webRid).filter(Boolean);
 }
-// 弹幕/信息叠层已停用：网格保持纯净画面
-function syncInfoMode() { /* no-op：纯净画面，不叠任何东西 */ }
+// 弹幕/礼物/战况任一开着才连弹幕 WS；全关 = 一条连接都不建，零开销
+function syncInfoMode() {
+  const on = !!(state.showDanmu || state.showGifts || state.showBattle);
+  window.mini.setInfoMode(on, on ? wallRids() : []);
+}
 
 // 双击 / ⓘ：在 app 内打开该直播间的真实抖音页（完整功能，限 1 个）
 // 双击 / ⓘ：独立浮窗打开手机版真实直播间（网格照常播，不受影响）
@@ -689,23 +747,37 @@ function setRoomQuality(id, q) {
   if (lp) { lp.attempts = 0; lp.start(''); }
 }
 
-// 弹幕渲染
-const DANMU_MAX = 60;
-// 一批弹幕（{rid, items:[...]}）：评论→右，贡献榜→左，在线→顶部
+// 弹幕/礼物渲染。一批消息（{rid, items:[...]}）：评论→右侧面板，礼物→左侧面板，在线→顶部数字。
+// 对应开关关着的类型直接丢弃（不建 DOM），默认全关时这条路径零开销。
+const DANMU_MAX = 40;   // 每格评论 DOM 上限（多路同开时控制节点总量）
+const GIFT_MAX = 30;    // 每格礼物行上限
 function handleDanmu(payload) {
   if (!payload || !payload.rid || !Array.isArray(payload.items)) return;
   const cell = gridEl.querySelector(`.cell[data-rid="${payload.rid}"]`);
   if (!cell) return;
-  const comments = cell.querySelector('.cell-comments');
+  let commentFrag = null;
   for (const it of payload.items) {
-    if (it.type === 'online') updateOnlineCell(cell, payload.rid, it.online);
-    else if (it.type === 'rank') renderRank(cell, it.list);
-    else appendComment(comments, it);
+    if (it.type === 'online') { updateOnlineCell(cell, payload.rid, it.online); continue; }
+    if (it.type === 'gift') { if (state.showGifts) appendGift(cell, it); continue; }
+    if (it.type === 'battle') { if (state.showBattle) renderBattleBars(cell, it.bars); continue; }
+    if (it.type === 'members') { if (state.showBattle) renderBattleMembers(cell, it.list); continue; }
+    if (it.type === 'rank') continue; // 左侧留给实时礼物，贡献榜不再叠加
+    if (!state.showDanmu) continue;
+    if (!commentFrag) commentFrag = document.createDocumentFragment();
+    commentFrag.appendChild(buildCommentLine(it));
+  }
+  // 一批评论一次性插入 + 只滚动一次，比逐条 append 省一大截布局开销
+  if (commentFrag) {
+    const panel = cell.querySelector('.cell-comments');
+    if (panel) {
+      panel.appendChild(commentFrag);
+      while (panel.children.length > DANMU_MAX) panel.removeChild(panel.firstChild);
+      panel.scrollTop = panel.scrollHeight;
+    }
   }
 }
 
-function appendComment(panel, it) {
-  if (!panel) return;
+function buildCommentLine(it) {
   const line = document.createElement('div');
   line.className = 'dm-line'
     + (it.type === 'join' ? ' dm-join' : '')
@@ -721,19 +793,69 @@ function appendComment(panel, it) {
   c.className = 'dm-text';
   c.textContent = it.content || (it.type === 'join' ? '来了' : '');
   line.appendChild(c);
-  panel.appendChild(line);
-  while (panel.children.length > DANMU_MAX) panel.removeChild(panel.firstChild);
-  panel.scrollTop = panel.scrollHeight;
+  return line;
 }
 
-// 贡献榜（真实 top 送礼人）整块替换渲染到左面板
-function renderRank(cell, list) {
-  const panel = cell.querySelector('.cell-gifts');
+// 比赛战况：任务/展馆进度血条（整块替换渲染，来一帧画一帧，天然实时）
+function renderBattleBars(cell, bars) {
+  const panel = cell.querySelector('.battle-bars');
+  if (!panel || !Array.isArray(bars)) return;
+  panel.innerHTML = bars.map((b) => {
+    const pct = b.target > 0 ? Math.min(100, Math.round((b.cur / b.target) * 100)) : 0;
+    const label = b.sub ? `${b.text} · ${b.sub}` : b.text;
+    return `<div class="bbar"><div class="bbar-fill" style="width:${pct}%"></div>`
+      + `<span class="bbar-label">${escapeHtml(label)}</span>`
+      + `<span class="bbar-num">${b.target > 0 ? `${b.cur}/${b.target}` : b.cur}</span></div>`;
+  }).join('');
+}
+
+// 比赛战况：团播成员实时分数 + 状态（表演中/冲刺中等，有状态就高亮）
+function fmtScore(n) {
+  n = Number(n) || 0;
+  return n >= 10000 ? (n / 10000).toFixed(1).replace(/\.0$/, '') + 'w' : String(n);
+}
+function renderBattleMembers(cell, list) {
+  const panel = cell.querySelector('.battle-members');
   if (!panel || !Array.isArray(list)) return;
-  panel.innerHTML = '<div class="rank-title">贡献榜</div>'
-    + list.map((r) =>
-      `<div class="rank-line"><span class="rank-no">${escapeHtml(String(r.rank))}</span><span class="rank-name">${escapeHtml(r.nickname || '')}</span></div>`
-    ).join('');
+  panel.innerHTML = list.map((m) =>
+    `<div class="bm-line${m.status ? ' bm-on' : ''}">`
+    + `<span class="bm-name">${escapeHtml(m.name || '')}</span>`
+    + `<span class="bm-status">${escapeHtml(m.status || '')}</span>`
+    + `<span class="bm-score">${fmtScore(m.score)}</span></div>`
+  ).join('');
+}
+
+// 实时礼物（左侧）。连击/重复送同款：合并到最后一行只更新数量，不刷屏。
+// 连击消息带的是累计数量，所以同键取 max 而不是相加。
+function appendGift(cell, it) {
+  const panel = cell.querySelector('.cell-gifts');
+  if (!panel) return;
+  const count = Math.max(1, Number(it.giftCount) || 1);
+  const key = `${it.user || ''}|${it.giftName || ''}`;
+  const last = panel.lastElementChild;
+  if (last && last.dataset.key === key) {
+    const n = Math.max(Number(last.dataset.count) || 1, count);
+    last.dataset.count = String(n);
+    last.querySelector('.gift-count').textContent = n > 1 ? `×${n}` : '';
+    return;
+  }
+  const line = document.createElement('div');
+  line.className = 'gift-line';
+  line.dataset.key = key;
+  line.dataset.count = String(count);
+  const u = document.createElement('span');
+  u.className = 'gift-user';
+  u.textContent = it.user || '';
+  const g = document.createElement('span');
+  g.className = 'gift-name';
+  g.textContent = ` 送 ${it.giftName || '礼物'} `;
+  const c = document.createElement('span');
+  c.className = 'gift-count';
+  c.textContent = count > 1 ? `×${count}` : '';
+  line.appendChild(u); line.appendChild(g); line.appendChild(c);
+  panel.appendChild(line);
+  while (panel.children.length > GIFT_MAX) panel.removeChild(panel.firstChild);
+  panel.scrollTop = panel.scrollHeight;
 }
 
 function updateOnlineCell(cell, rid, online) {
@@ -752,7 +874,9 @@ function persist() {
     cols: state.cols,
     library: state.library,
     wall: state.rooms.map((r) => r.id),
-    infoMode: state.infoMode,
+    showDanmu: state.showDanmu,
+    showGifts: state.showGifts,
+    showBattle: state.showBattle,
     globalQuality: state.globalQuality,
     hudAlways: state.hudAlways,
     liveOnly: state.liveOnly,
@@ -852,6 +976,36 @@ if (btnHud) btnHud.addEventListener('click', () => {
   persist();
 });
 
+// 弹幕/礼物/战况开关（默认关；任一开着才连弹幕 WS，关掉清空面板释放 DOM）
+const btnDanmu = document.getElementById('btn-danmu');
+const btnGifts = document.getElementById('btn-gifts');
+const btnBattle = document.getElementById('btn-battle');
+function applyOverlayToggles() {
+  gridEl.classList.toggle('show-danmu', !!state.showDanmu);
+  gridEl.classList.toggle('show-gifts', !!state.showGifts);
+  gridEl.classList.toggle('show-battle', !!state.showBattle);
+  if (btnDanmu) btnDanmu.classList.toggle('active', !!state.showDanmu);
+  if (btnGifts) btnGifts.classList.toggle('active', !!state.showGifts);
+  if (btnBattle) btnBattle.classList.toggle('active', !!state.showBattle);
+  if (!state.showDanmu) gridEl.querySelectorAll('.cell-comments').forEach((p) => { p.textContent = ''; });
+  if (!state.showGifts) gridEl.querySelectorAll('.cell-gifts').forEach((p) => { p.textContent = ''; });
+  if (!state.showBattle) gridEl.querySelectorAll('.battle-bars, .battle-members').forEach((p) => { p.textContent = ''; });
+}
+function wireOverlayToggle(btn, key, onMsg, offMsg) {
+  if (!btn) return;
+  btn.addEventListener('click', () => {
+    state[key] = !state[key];
+    applyOverlayToggles();
+    syncInfoMode();
+    persist();
+    toast(state[key] ? onMsg : offMsg);
+  });
+}
+wireOverlayToggle(btnDanmu, 'showDanmu', '实时弹幕已开（画面右侧）', '实时弹幕已关');
+wireOverlayToggle(btnGifts, 'showGifts', '实时礼物已开（画面左侧）', '实时礼物已关');
+wireOverlayToggle(btnBattle, 'showBattle', '比赛战况已开（画面上部，等比赛数据推送）', '比赛战况已关');
+window.mini.onDanmu(handleDanmu);
+
 // 只看在播开关
 const btnLiveOnly = document.getElementById('btn-live-only');
 const liveOnlyEmpty = document.getElementById('liveonly-empty');
@@ -895,8 +1049,16 @@ btnLibAdd.addEventListener('click', () => {
 libUrlEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') btnLibAdd.click(); });
 
 btnWallAll.addEventListener('click', () => {
-  for (const it of state.library) putOnWall(it.id, { noRender: true });
-  persist(); renderGrid(); renderLibList();
+  // 增量补上缺的格子（已在播的不动不重连），新格子错峰起播防 CPU 尖峰
+  const newRooms = [];
+  for (const it of state.library) {
+    if (isOnWall(it.id)) continue;
+    const room = makeRoom(it);
+    state.rooms.push(room);
+    newRooms.push(room);
+  }
+  newRooms.forEach((room, i) => addCellForRoom(room, i * 450));
+  persist(); renderLibList(); syncInfoMode();
   toast(`已全部上墙（${state.rooms.length} 路）`);
 });
 btnWallNone.addEventListener('click', () => {
@@ -912,6 +1074,12 @@ libListEl.addEventListener('change', (e) => {
   if (chk) { toggleWall(chk.dataset.id); return; }
   const grp = e.target.closest('.lib-group-edit');
   if (grp) { setBrand(grp.dataset.id, grp.value); return; }
+  const nm = e.target.closest('.lib-name-edit');
+  if (nm) { setName(nm.dataset.id, nm.value); return; }
+});
+// 名字输入框回车 = 立即生效并收起键盘焦点
+libListEl.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && e.target.closest('.lib-name-edit')) e.target.blur();
 });
 libListEl.addEventListener('click', (e) => {
   const del = e.target.closest('.lib-del');
@@ -930,12 +1098,17 @@ setInterval(async () => {
     if (lp.destroyed || lp.room.status !== 'live' || !lp.room.webRid) continue;
     try {
       const res = await window.mini.resolve(lp.room.webRid, 'fluent');
-      // 只取在线人数，绝不因此改播放状态（接口这次抽风也不影响画面）
-      if (res && res.userCount) { lp.room.count = res.userCount; lp.updateStats(); }
+      // 只取在线人数+源流标称参数，绝不因此改播放状态（接口这次抽风也不影响画面）
+      if (res && res.userCount) lp.room.count = res.userCount;
+      if (res && res.srcMeta && Object.keys(res.srcMeta).length) lp.room.src = res.srcMeta; // 主播中途改推流设置也能跟上
+      if (res && (res.userCount || res.srcMeta)) lp.updateStats();
     } catch { /* ignore */ }
     await new Promise((r) => setTimeout(r, 400)); // 逐个错峰，别一次性打爆接口
   }
 }, 90000);
+
+// mac 隐藏标题栏时红绿灯悬在窗口左上 → 给 topbar 留出让位间距（Windows 无此问题不留）
+if (/Mac/i.test(navigator.platform)) document.body.classList.add('platform-mac');
 
 // —— 启动 —— //
 async function init() {
@@ -952,6 +1125,10 @@ async function init() {
   state.hudAlways = !!(saved && saved.hudAlways);
   applyHudAlways();
   state.liveOnly = !!(saved && saved.liveOnly);
+  state.showDanmu = !!(saved && saved.showDanmu);
+  state.showGifts = !!(saved && saved.showGifts);
+  state.showBattle = !!(saved && saved.showBattle);
+  applyOverlayToggles();
   if (globalQualityEl) globalQualityEl.value = state.globalQuality;
 
   // 首次打开（没有任何保存）→ 载入默认直播间，开箱即看

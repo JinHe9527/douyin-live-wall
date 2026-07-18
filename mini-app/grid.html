@@ -9,8 +9,6 @@
 
 <body>
   <header class="topbar">
-    <div class="brand">抖音多宫格直播墙</div>
-
     <div class="add-box">
       <input id="room-input" type="text" placeholder="粘贴直播间链接或房间号，回车添加（如 https://live.douyin.com/123456789）" />
       <button id="btn-add" class="btn btn-primary">添加</button>
@@ -38,6 +36,12 @@
     <button id="btn-live-only" class="btn" title="只显示当前正在直播的直播间，已下播/未开播的自动隐藏，在播的铺满整墙">只看在播</button>
 
     <button id="btn-hud" class="btn" title="常驻显示每个直播间的名字/分辨率/帧率/码率（否则悬停才显示）">常显信息</button>
+
+    <button id="btn-danmu" class="btn" title="实时弹幕显示在每格画面右侧（真实评论/进场，来自弹幕直连）">弹幕</button>
+
+    <button id="btn-gifts" class="btn" title="实时礼物显示在每格画面左侧（送礼人/礼物/数量，连击合并）">礼物</button>
+
+    <button id="btn-battle" class="btn" title="比赛战况显示在每格画面上部：任务/展馆进度血条 + 团播成员实时分数与状态（表演中等），数据来自弹幕直连">战况</button>
 
     <span id="login-dot" class="login-dot" title="抖音登录状态：未登录"></span>
 

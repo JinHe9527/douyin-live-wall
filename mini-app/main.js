@@ -53,8 +53,30 @@ function saveRooms(data) {
   }
 }
 
+// —— 隐藏工作窗口的省资源核心 —— //
+// resolver/nav/danmuHub 都常驻 live.douyin.com（首页会自动播直播）：不拦的话每个隐藏窗口
+// 都在白白解码一路视频 + 持续吃带宽，弱机被这几路"看不见的直播"拖卡。
+// 按 webContentsId 精准拦掉这些窗口的媒体请求（主窗口拉流/详情窗真实页完全不受影响）。
+const mediaBlockedWC = new Set();
+function blockMediaIn(win) {
+  if (win && !win.isDestroyed()) mediaBlockedWC.add(win.webContents.id);
+}
+// 兜底：把已缓冲的也停掉（网络拦了之后 decode 兜底停干净）
+const PAUSE_MEDIA_JS =
+  "if(!window.__pmOn){window.__pmOn=1;setInterval(()=>{try{document.querySelectorAll('video,audio').forEach(v=>{if(!v.paused)v.pause();});}catch(e){}},2000);}true;";
+function keepMediaPaused(win) {
+  if (win && !win.isDestroyed()) win.webContents.executeJavaScript(PAUSE_MEDIA_JS).catch(() => {});
+}
+
 // CDN flv 跨域：给 CDN 的 flv 请求补 Referer + 放开 CORS，让 renderer 能 fetch 播放。
 function installCdnHeaderRewrite(sess) {
+  sess.webRequest.onBeforeRequest((details, cb) => {
+    if (mediaBlockedWC.has(details.webContentsId)
+      && (details.resourceType === 'media' || /\.(flv|m3u8|ts|mp4)(\?|$)/i.test(details.url))) {
+      return cb({ cancel: true });
+    }
+    cb({});
+  });
   sess.webRequest.onBeforeSendHeaders((details, cb) => {
     const headers = details.requestHeaders;
     if (CDN_HOST_RE.test(details.url) && /\.flv|\.m3u8|\.ts(\?|$)/i.test(details.url)) {
@@ -98,8 +120,10 @@ function ensureResolver(douyinSession) {
     resolverWin.webContents.setUserAgent(DESKTOP_UA);
     // 常驻停在 live.douyin.com 首页，首页会自动播推荐直播间且带声 → 必须静音，否则漏「别的直播间」的音
     resolverWin.webContents.setAudioMuted(true);
+    blockMediaIn(resolverWin); // 隐藏页不准拉视频流（省一路解码+带宽）
     await waitLoad(resolverWin, 'https://live.douyin.com/');
     await new Promise((r) => setTimeout(r, 1200));
+    keepMediaPaused(resolverWin);
   })();
   return resolverReady;
 }
@@ -120,6 +144,8 @@ async function ensureNav(douyinSession) {
   navWin.webContents.setUserAgent(DESKTOP_UA);
   // 兜底解析会导航到直播间页（自动播放带声）→ 同样静音，纯解析窗口不出声
   navWin.webContents.setAudioMuted(true);
+  blockMediaIn(navWin); // 导航页只要 DOM/接口，不准拉视频流
+  navWin.webContents.on('did-finish-load', () => keepMediaPaused(navWin)); // 每次导航后都补一针
   await waitLoad(navWin, 'about:blank', 3000);
 }
 
@@ -204,6 +230,7 @@ function ensureDanmuHub() {
     danmuHub = new BrowserWindow({ show: false, webPreferences: { session: ses } });
     danmuHub.webContents.setUserAgent(DESKTOP_UA);
     danmuHub.webContents.setAudioMuted(true);
+    blockMediaIn(danmuHub); // 弹幕枢纽只要 WS+签名，不准拉视频流
     danmuHub.webContents.on('console-message', (_e, _l, message) => {
       if (!message.startsWith('DM::')) return;
       const i1 = message.indexOf('::', 4);
@@ -214,6 +241,7 @@ function ensureDanmuHub() {
       if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('danmu', { rid, items });
     });
     await waitLoad(danmuHub, 'https://live.douyin.com/');
+    keepMediaPaused(danmuHub);
     // 等 byted_acrawler 就绪（签名需要）
     for (let i = 0; i < 24; i++) {
       const ok = await danmuHub.webContents

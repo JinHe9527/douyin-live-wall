@@ -7,6 +7,31 @@ const conns = new Map(); // id -> DyCast
 
 function nick(u) { return (u && (u.name || u.nickname)) || ''; }
 
+function safeParse(s) { try { return JSON.parse(s); } catch (e) { return null; } }
+
+// 从房间横幅 JSON 里递归收集所有"进度条"（main_text + current/target_value 组合，
+// biz_data 是二次 JSON 字符串也照样往里钻）。覆盖礼物墙/比赛任务等各种活动横幅。
+function collectBars(o, out, depth) {
+  // 真实结构：giftwall→banner_detail→role2views→user→banners[]→custom_props→biz_data(二次JSON)→main_text，
+  // 嵌套可达 9-10 层，上限给足 12
+  if (depth > 12 || out.length >= 12 || o == null) return;
+  if (typeof o === 'string') {
+    if (o.length < 6000 && o.indexOf('main_text') !== -1) collectBars(safeParse(o), out, depth + 1);
+    return;
+  }
+  if (typeof o !== 'object') return;
+  if (o.main_text !== undefined && (o.current_value !== undefined || o.target_value !== undefined)) {
+    out.push({
+      text: String(o.main_text || ''),
+      sub: String(o.sub_text || ''),
+      cur: Number(o.current_value) || 0,
+      target: Number(o.target_value) || 0,
+    });
+    return;
+  }
+  for (const k in o) collectBars(o[k], out, depth + 1);
+}
+
 function simplify(items) {
   const out = [];
   for (const m of items || []) {
@@ -35,6 +60,19 @@ function simplify(items) {
     } else if (method === 'WebcastRoomStatsMessage') {
       const c = (m.room && m.room.audienceCount); // displayMiddle = 在线观众
       if (c != null) out.push({ type: 'online', online: String(c) });
+    } else if (method === 'WebcastInRoomBannerMessage') {
+      // 比赛/活动横幅：抽出全部进度条（血条），role2views 里 user/anchor 视角会重复 → 去重
+      const bars = [];
+      collectBars(safeParse(m.content), bars, 0);
+      const seen = new Set(), ded = [];
+      for (const b of bars) {
+        const k = b.text + '|' + b.sub + '|' + b.cur + '|' + b.target;
+        if (!seen.has(k)) { seen.add(k); ded.push(b); }
+      }
+      if (ded.length) out.push({ type: 'battle', bars: ded.slice(0, 6) });
+    } else if (method === 'WebcastGroupLiveMemberChangeMessage') {
+      // 团播成员战况：名字/实时分数/状态(表演中等)
+      if (m.members && m.members.length) out.push({ type: 'members', list: m.members.slice(0, 10) });
     }
   }
   return out;
