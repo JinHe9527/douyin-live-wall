@@ -10,6 +10,7 @@ const emptyHint = document.getElementById('empty-hint');
 const inputEl = document.getElementById('room-input');
 const btnAdd = document.getElementById('btn-add');
 const btnBack = document.getElementById('btn-back');
+const btnRefreshAll = document.getElementById('btn-refresh-all');
 const globalQualityEl = document.getElementById('global-quality');
 const toastEl = document.getElementById('toast');
 
@@ -41,6 +42,8 @@ const groupListEl = document.getElementById('group-list');
 const btnLibAdd = document.getElementById('btn-lib-add');
 const libListEl = document.getElementById('lib-list');
 const drawerStat = document.getElementById('drawer-stat');
+const autoRecordingEnabledEl = document.getElementById('auto-recording-enabled');
+const autoRecordingDurationEl = document.getElementById('auto-recording-duration');
 
 const state = {
   library: [],   // [{ id, name, brand, url, kind }]
@@ -53,6 +56,8 @@ const state = {
   globalQuality: 'auto', // auto | origin | hd | sd | fluent
   hudAlways: false,      // 名字/分辨率/帧率/码率 是否常驻显示
   liveOnly: false,       // 只显示当前在播（已下播/未开播的自动隐藏，其余格子铺满整墙）
+  autoRecording: { enabled: false, durationHours: 1, roomIds: [] },
+  recordingRooms: new Set(),
 };
 const players = new Map(); // id -> LivePlayer
 let savedQuality = {};     // libId -> quality（从持久化恢复）
@@ -94,9 +99,8 @@ function desiredQuality(room) {
 }
 
 // —— 只看在播 —— //
-// 仅隐藏「已确认没在播」的格子(offline/ended/error)；loading/重连中 保持可见，避免直播抖动时格子闪进闪出
 function isHiddenByLiveOnly(room) {
-  return state.liveOnly && (room.status === 'offline' || room.status === 'ended' || room.status === 'error');
+  return window.LivePresence.isHiddenByLiveOnly(state.liveOnly, room.presence);
 }
 function visibleRoomCount() {
   return state.rooms.reduce((n, r) => n + (isHiddenByLiveOnly(r) ? 0 : 1), 0);
@@ -113,21 +117,26 @@ class LivePlayer {
     this.attempts = 0;
     this.recoverTimer = null;
     this.stallTimer = null;
+    this.resolvePromise = null;
     this.lastTime = 0;
     this.destroyed = false;
-    this.endedStrikes = 0;     // 连续几次接口确认"没在播"，需 ≥2 才判未开播（防单次接口抖动/风控误判）
     this.STALL_MS = 12000;     // 卡顿判定放宽到 12s（原画高码率短卡顿是常态）
 
     videoEl.muted = true;
     videoEl.addEventListener('playing', () => {
+      this.updatePresence('live');
       this.setState('live');
       this.attempts = 0;
-      this.endedStrikes = 0;   // 成功播放 → 重置"没在播"计数
       this.lastTime = videoEl.currentTime;
       this.armStall();
     });
     // 直播流不该真结束：video 触发 ended 多半是网络抖动/流过期 → 自愈重连，让接口去确认是否真下播
     videoEl.addEventListener('ended', () => { if (!this.destroyed) this.recover('video-ended'); });
+  }
+
+  updatePresence(type) {
+    this.room.presence = window.LivePresence.reducePresence(this.room.presence, { type });
+    if (state.liveOnly) applyLiveOnly();
   }
 
   setState(stateName, text) {
@@ -145,8 +154,6 @@ class LivePlayer {
       const dot = cell.querySelector('.cell-live-dot');
       if (dot) dot.style.display = live ? '' : 'none';
     }
-    // 只看在播模式下：状态一变就重算可见性+布局（在播的出现/下播的隐藏并让其它铺满）
-    if (state.liveOnly) applyLiveOnly();
   }
 
   // 悬停浮层：在线人数 · 分辨率 · 帧率 · 码率
@@ -257,6 +264,7 @@ class LivePlayer {
   async start(flvUrl) {
     this.clearTimers();
     this.recovering = false;
+    if (this.room.presence.availability === 'live') this.updatePresence('reconnecting');
     if (flvUrl) {
       this.setState('loading', '连接直播流…');
       this.create(flvUrl);
@@ -267,11 +275,20 @@ class LivePlayer {
     }
   }
 
-  async reResolve() {
+  async reResolve(options = {}) {
+    if (this.resolvePromise) return this.resolvePromise;
+    this.resolvePromise = this.resolveOnce(options).finally(() => {
+      this.resolvePromise = null;
+    });
+    return this.resolvePromise;
+  }
+
+  async resolveOnce({ preservePlaying = false } = {}) {
     try {
       const res = await window.mini.resolve(this.room.url, desiredQuality(this.room));
+      if (this.destroyed) return false;
       if (res && res.ok && res.flvUrl) {
-        this.endedStrikes = 0;
+        this.updatePresence('live');
         this.room.webRid = res.webRid;
         this.room.flvUrl = res.flvUrl;
         if (res.title) this.room.title = res.title;
@@ -281,26 +298,31 @@ class LivePlayer {
         updateCellMeta(this.room);
         this.updateStats();
         syncInfoMode();
-        this.create(res.flvUrl);
+        if (!(preservePlaying && this.room.status === 'live')) this.create(res.flvUrl);
         return true;
       }
-      // "没在播"(offline 主页没开播 / ended 接口已结束)：单次都可能是接口抖动/风控/主页加载失败，
-      // 一律要连续 ≥2 次确认才显示未开播，否则当临时问题继续重连 —— 彻底堵死"在播却显示下播"
       if (res && (res.status === 'offline' || res.status === 'ended')) {
-        this.endedStrikes += 1;
-        if (this.endedStrikes >= 2) { this.setState(res.status, '未开播'); return true; }
+        this.updatePresence('offline');
+        if (this.room.presence.availability === 'offline') {
+          this.destroyPlayer();
+          this.setState(res.status, '未开播');
+          return true;
+        }
         return false;
       }
-    } catch { /* ignore */ }
+      if (!(preservePlaying && this.room.status === 'live')) this.updatePresence('unknown');
+    } catch {
+      if (!(preservePlaying && this.room.status === 'live')) this.updatePresence('unknown');
+    }
     return false;
   }
 
   // 自动追踪：未开播/已结束的格子定时重查，开播即起播
   recheck() {
     if (this.destroyed) return;
-    if (this.room.status === 'offline' || this.room.status === 'ended' || this.room.status === 'error') {
+    if (this.room.presence.availability !== 'live' || this.room.status === 'loading') {
       this.attempts = 0;
-      this.reResolve();
+      this.reResolve({ preservePlaying: true });
     }
   }
 
@@ -309,6 +331,7 @@ class LivePlayer {
     this.recovering = true;
     this.clearTimers();
     this.attempts += 1;
+    this.updatePresence('reconnecting');
     this.setState('loading', '重连中…');
     const delay = Math.min(this.attempts * 800, 10000); // 递增退避，封顶 10s，持续重连不放弃
     this.recoverTimer = setTimeout(async () => {
@@ -513,6 +536,7 @@ function addToLibrary(name, url, brand) {
 function removeFromLibrary(id) {
   takeOffWall(id);
   state.library = state.library.filter((x) => x.id !== id);
+  state.autoRecording.roomIds = state.autoRecording.roomIds.filter((roomId) => roomId !== id);
   persist();
   renderLibList();
 }
@@ -543,6 +567,7 @@ function makeRoom(lib) {
   return {
     id: lib.id, name: lib.name, brand: lib.brand, url: lib.url, kind: lib.kind,
     webRid: '', title: '', anchor: '', count: '', flvUrl: '', status: 'loading',
+    presence: window.LivePresence.createPresence(),
     quality: savedQuality[lib.id] || '',
   };
 }
@@ -628,13 +653,20 @@ function renderLibList() {
     html += `<div class="lib-group-title">${escapeHtml(g)}（${items.length}）</div>`;
     for (const it of items) {
       const checked = isOnWall(it.id) ? 'checked' : '';
+      const recordChecked = state.autoRecording.roomIds.includes(it.id) ? 'checked' : '';
+      const isRecording = state.recordingRooms.has(it.id);
       const kindLabel = it.kind === 'profile' ? '主页' : '直播间';
       html += `
-      <div class="lib-row" data-id="${it.id}">
+      <div class="lib-row${isRecording ? ' is-recording' : ''}" data-id="${it.id}">
         <input type="checkbox" class="lib-check" data-id="${it.id}" ${checked} />
         <div class="lib-info">
           <input class="lib-name-edit" data-id="${it.id}" value="${escapeHtml(it.name || '')}" placeholder="${escapeHtml(it.url)}" title="改名字（回车或点别处生效）" />
           <div class="lib-meta"><span class="lib-kind ${it.kind}">${kindLabel}</span>${escapeHtml(it.url)}</div>
+          <label class="lib-record-option">
+            <input type="checkbox" class="lib-record-check" data-id="${it.id}" ${recordChecked} />
+            <span>自动录制</span>
+            <span class="recording-status">录制中</span>
+          </label>
         </div>
         <input class="lib-group-edit" data-id="${it.id}" list="group-list" value="${escapeHtml(it.brand || '')}" placeholder="分组" title="改分组" />
         <button class="lib-del" data-id="${it.id}" title="从库删除">${icon('close')}</button>
@@ -671,6 +703,17 @@ function setName(id, name) {
   const room = state.rooms.find((r) => r.id === id);
   if (room) { room.name = lib.name; updateCellMeta(room); }
   persist();
+}
+
+function setRoomAutoRecording(id, enabled) {
+  const selected = new Set(state.autoRecording.roomIds);
+  if (enabled) selected.add(id);
+  else selected.delete(id);
+  state.autoRecording.roomIds = state.library
+    .map((room) => room.id)
+    .filter((roomId) => selected.has(roomId));
+  persist();
+  renderLibList();
 }
 
 // —— 操作：宫格控件 —— //
@@ -853,10 +896,36 @@ function updateOnlineCell(cell, rid, online) {
 }
 
 // —— 持久化 —— //
+function normalizeAutoRecording(value) {
+  const input = value && typeof value === 'object' ? value : {};
+  const durationHours = Number(input.durationHours);
+  const validIds = new Set(state.library.map((room) => room.id));
+  return {
+    enabled: input.enabled === true,
+    durationHours: Number.isInteger(durationHours) && durationHours >= 1 && durationHours <= 5
+      ? durationHours
+      : 1,
+    roomIds: [...new Set(Array.isArray(input.roomIds) ? input.roomIds : [])]
+      .filter((id) => validIds.has(id)),
+  };
+}
+
+function applyAutoRecordingControls() {
+  if (autoRecordingEnabledEl) autoRecordingEnabledEl.checked = state.autoRecording.enabled;
+  if (autoRecordingDurationEl) autoRecordingDurationEl.value = String(state.autoRecording.durationHours);
+}
+
+function syncAutoRecordingConfig() {
+  window.mini.setAutoRecordingConfig({
+    library: state.library,
+    autoRecording: state.autoRecording,
+  });
+}
+
 function persist() {
   const quality = {};
   for (const r of state.rooms) if (r.quality) quality[r.id] = r.quality;
-  window.mini.saveRooms({
+  const snapshot = {
     cols: state.cols,
     library: state.library,
     wall: state.rooms.map((r) => r.id),
@@ -866,8 +935,11 @@ function persist() {
     globalQuality: state.globalQuality,
     hudAlways: state.hudAlways,
     liveOnly: state.liveOnly,
+    autoRecording: state.autoRecording,
     quality,
-  });
+  };
+  window.mini.saveRooms(snapshot);
+  syncAutoRecordingConfig();
 }
 
 // —— 事件 —— //
@@ -950,6 +1022,19 @@ refreshLoginStatus();
 // 全局清晰度
 if (globalQualityEl) globalQualityEl.addEventListener('change', () => setGlobalQuality(globalQualityEl.value));
 
+if (autoRecordingEnabledEl) autoRecordingEnabledEl.addEventListener('change', () => {
+  state.autoRecording.enabled = autoRecordingEnabledEl.checked;
+  persist();
+  toast(state.autoRecording.enabled ? '自动录制已开启' : '自动录制已关闭');
+});
+if (autoRecordingDurationEl) autoRecordingDurationEl.addEventListener('change', () => {
+  state.autoRecording.durationHours = Number(autoRecordingDurationEl.value);
+  state.autoRecording = normalizeAutoRecording(state.autoRecording);
+  applyAutoRecordingControls();
+  persist();
+  toast(`自动录制时长：${state.autoRecording.durationHours} 小时`);
+});
+
 // 常显信息开关（名字/分辨率/帧率/码率 常驻显示，否则悬停显示）
 const btnHud = document.getElementById('btn-hud');
 function applyHudAlways() {
@@ -1002,6 +1087,21 @@ window.mini.onDanmuBatch((map) => {
   for (const rid in map) handleDanmu({ rid, items: map[rid] });
 });
 
+window.mini.onRecordingStatus((payload) => {
+  if (!payload || !payload.roomId) return;
+  if (payload.status === 'recording') state.recordingRooms.add(payload.roomId);
+  else state.recordingRooms.delete(payload.roomId);
+  const row = libListEl.querySelector(`.lib-row[data-id="${payload.roomId}"]`);
+  if (row) row.classList.toggle('is-recording', payload.status === 'recording');
+  if (payload.status === 'recording') {
+    toast(`${payload.roomName} 开始自动录制`);
+  } else if (payload.status === 'failed') {
+    toast(`${payload.roomName} 自动录制失败`, 5000);
+  } else if (payload.status === 'stopped' && payload.reason !== 'app-quit') {
+    toast(`${payload.roomName} 自动录制已结束`);
+  }
+});
+
 // 只看在播开关
 const btnLiveOnly = document.getElementById('btn-live-only');
 const liveOnlyEmpty = document.getElementById('liveonly-empty');
@@ -1024,6 +1124,25 @@ if (btnLiveOnly) btnLiveOnly.addEventListener('click', () => {
   persist();
   toast(state.liveOnly ? '只显示当前在播' : '显示全部直播间');
 });
+
+async function refreshAllRooms() {
+  if (refreshAllRooms.running) return;
+  refreshAllRooms.running = true;
+  if (btnRefreshAll) btnRefreshAll.disabled = true;
+  const jobs = [...players.values()].map((player, index) => new Promise((resolve) => {
+    setTimeout(() => resolve(player.reResolve({ preservePlaying: true })), index * 250);
+  }));
+  try {
+    await Promise.all(jobs);
+    const liveCount = state.rooms.filter((room) => room.presence.availability === 'live').length;
+    toast(`刷新完成，当前 ${liveCount} 个直播间在播`);
+  } finally {
+    refreshAllRooms.running = false;
+    if (btnRefreshAll) btnRefreshAll.disabled = false;
+  }
+}
+refreshAllRooms.running = false;
+if (btnRefreshAll) btnRefreshAll.addEventListener('click', refreshAllRooms);
 
 // 手动检查更新
 const btnCheckUpdate = document.getElementById('btn-check-update');
@@ -1066,6 +1185,8 @@ btnWallNone.addEventListener('click', () => {
 });
 
 libListEl.addEventListener('change', (e) => {
+  const record = e.target.closest('.lib-record-check');
+  if (record) { setRoomAutoRecording(record.dataset.id, record.checked); return; }
   const chk = e.target.closest('.lib-check');
   if (chk) { toggleWall(chk.dataset.id); return; }
   const grp = e.target.closest('.lib-group-edit');
@@ -1083,10 +1204,16 @@ libListEl.addEventListener('click', (e) => {
   removeFromLibrary(del.dataset.id);
 });
 
-// 自动追踪：每 150s 重查未开播/已结束的格子，开播即上画面
+const ROOM_POLL_INTERVAL_MS = 15_000;
+
+// 自动追踪：错峰重查未开播、状态未知和重连中的格子，开播即上画面
 setInterval(() => {
-  for (const lp of players.values()) lp.recheck();
-}, 150000);
+  let index = 0;
+  for (const lp of players.values()) {
+    setTimeout(() => lp.recheck(), index * 250);
+    index += 1;
+  }
+}, ROOM_POLL_INTERVAL_MS);
 
 // 每 90s 刷新在播房间的在线人数（只更新数字，不改播放状态；错峰避免接口密集触发风控）
 setInterval(async () => {
@@ -1110,6 +1237,7 @@ if (/Mac/i.test(navigator.platform)) document.body.classList.add('platform-mac')
 async function init() {
   let saved;
   try { saved = await window.mini.loadRooms(); } catch { saved = null; }
+  const savedAutoRecording = saved && saved.autoRecording;
   if (saved && saved.cols) {
     state.cols = saved.cols;
     document.querySelectorAll('.col-btn').forEach((b) => b.classList.toggle('active', b.dataset.cols === String(saved.cols)));
@@ -1136,6 +1264,10 @@ async function init() {
     // 兼容旧格式（saved.rooms 是直接的 url 列表）
     for (const it of saved.rooms) addToLibrary(it.title || '', it.room || it.url, '');
   }
+
+  state.autoRecording = normalizeAutoRecording(savedAutoRecording);
+  applyAutoRecordingControls();
+  syncAutoRecordingConfig();
 
   for (const libId of wall) putOnWall(libId, { noRender: true });
   renderGrid();

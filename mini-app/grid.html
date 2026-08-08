@@ -33,6 +33,8 @@
       </select>
     </div>
 
+    <button id="btn-refresh-all" class="btn" title="立即重新检查全部上墙直播间">全部刷新</button>
+
     <button id="btn-live-only" class="btn" title="只显示当前正在直播的直播间，已下播/未开播的自动隐藏，在播的铺满整墙">只看在播</button>
 
     <button id="btn-hud" class="btn" title="常驻显示每个直播间的名字/分辨率/帧率/码率（否则悬停才显示）">常显信息</button>
@@ -88,6 +90,25 @@
     </div>
     <div class="drawer-stat" style="padding-top:0;">登录后：双击打开的真实直播间可看原画、可发言。不登录也能看（原画限 26 秒）。</div>
 
+    <section class="recording-settings" aria-labelledby="recording-settings-title">
+      <div class="recording-settings-copy">
+        <div id="recording-settings-title" class="recording-settings-title">自动录制</div>
+        <div class="recording-settings-desc">检测到所选直播间开播后，保存原始画面和声音到系统视频目录。</div>
+      </div>
+      <label class="recording-switch">
+        <input id="auto-recording-enabled" type="checkbox" />
+        <span>启用</span>
+      </label>
+      <label class="recording-duration-label" for="auto-recording-duration">时长</label>
+      <select id="auto-recording-duration" class="mini-select">
+        <option value="1">1 小时</option>
+        <option value="2">2 小时</option>
+        <option value="3">3 小时</option>
+        <option value="4">4 小时</option>
+        <option value="5">5 小时</option>
+      </select>
+    </section>
+
     <div class="drawer-add">
       <div class="drawer-add-row">
         <input id="lib-name" class="lib-input" type="text" placeholder="名称（可选，如 宇宙009）" />
@@ -105,6 +126,7 @@
   <div id="toast" class="toast" hidden></div>
 
   <script src="../lib/vendor/mpegts.js"></script>
+  <script src="../lib/live-presence.js"></script>
   <script src="./grid.js"></script>
 </body>
 

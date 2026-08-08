@@ -6,6 +6,8 @@ contextBridge.exposeInMainWorld('mini', {
   resolve: (room, quality) => ipcRenderer.invoke('mini-resolve', { room, quality }),
   loadRooms: () => ipcRenderer.invoke('mini-load-rooms'),
   saveRooms: (data) => ipcRenderer.invoke('mini-save-rooms', data),
+  setAutoRecordingConfig: (payload) => ipcRenderer.send('mini-auto-recording-config', payload),
+  onRecordingStatus: (cb) => ipcRenderer.on('recording-status', (_e, payload) => cb(payload)),
   // 信息模式：上报开关 + 在墙已解析 webRid 列表
   setInfoMode: (on, rids) => ipcRenderer.send('mini-info-mode', { on, rids }),
   // 攒批弹幕：一包里含多个房间 { rid: items[] }，渲染层自行分发

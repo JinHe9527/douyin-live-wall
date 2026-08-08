@@ -9,6 +9,8 @@ const path = require('path');
 const fs = require('fs');
 const { app, BrowserWindow, WebContentsView, session, ipcMain, dialog, shell, net, Menu } = require('electron');
 const { resolveStream } = require('../lib/douyin-stream');
+const { createAutoRecorder, createElectronStreamOpener } = require('../lib/auto-recorder');
+const { buildRecordingFilePath } = require('../lib/recording-settings');
 
 // 隐藏顶部原生菜单栏(File/Edit/View… 那两条)。Mac 保留系统菜单(否则复制粘贴/退出快捷键会失效)。
 if (process.platform !== 'darwin') Menu.setApplicationMenu(null);
@@ -34,6 +36,8 @@ const CDN_HOST_RE = /(\.douyincdn\.com|\.douyin\.com|\.amemv\.com|\.bytedance\.|
 let mainWin = null;
 let resolverWin = null;
 let resolverReady = null; // Promise：并发调用共享同一次建窗，避免开机 8 路并发各建一窗漏窗
+let autoRecorder = null;
+let pendingRecordingConfig = null;
 
 function roomsStorePath() {
   return path.join(app.getPath('userData'), 'mini_rooms.json');
@@ -167,10 +171,40 @@ function makeCtx() {
   return { apiRunJs: resolverRunJs, withNav };
 }
 
+function ensureAutoRecorder(douyinSession) {
+  if (autoRecorder) return autoRecorder;
+  autoRecorder = createAutoRecorder({
+    resolveRoom: async (roomUrl, quality) => {
+      await ensureResolver(douyinSession);
+      return resolveStream(makeCtx(), roomUrl, { quality });
+    },
+    openStream: createElectronStreamOpener({
+      net,
+      session: douyinSession,
+      userAgent: DESKTOP_UA,
+    }),
+    createOutput: (filePath) => {
+      fs.mkdirSync(path.dirname(filePath), { recursive: true });
+      return fs.createWriteStream(filePath, { flags: 'wx' });
+    },
+    buildFilePath: (room, now) => buildRecordingFilePath(app.getPath('videos'), room, now),
+    onStatus: (payload) => {
+      if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('recording-status', payload);
+    },
+  });
+  autoRecorder.start();
+  if (pendingRecordingConfig) {
+    autoRecorder.updateConfig(pendingRecordingConfig);
+    pendingRecordingConfig = null;
+  }
+  return autoRecorder;
+}
+
 async function createWindow() {
   const douyinSession = session.fromPartition('persist:douyin');
   installCdnHeaderRewrite(douyinSession);
   douyinSession.setUserAgent(DESKTOP_UA);
+  ensureAutoRecorder(douyinSession);
 
   mainWin = new BrowserWindow({
     width: 1440,
@@ -211,6 +245,15 @@ ipcMain.handle('mini-resolve', async (_evt, { room, quality }) => {
 
 ipcMain.handle('mini-load-rooms', () => loadRooms());
 ipcMain.handle('mini-save-rooms', (_evt, data) => { saveRooms(data); return { ok: true }; });
+ipcMain.on('mini-auto-recording-config', (_evt, payload) => {
+  if (!autoRecorder) {
+    pendingRecordingConfig = payload;
+    return;
+  }
+  autoRecorder.updateConfig(payload).catch((error) => {
+    console.error('[mini] update recording config failed', error);
+  });
+});
 
 // —— 信息模式：弹幕 WS 直连（一个 danmuHub 页扛多路） —— //
 // 在 live.douyin.com 首页（含 byted_acrawler 可算签名）里注入 danmu-bundle，
@@ -534,4 +577,7 @@ if (!app.requestSingleInstanceLock()) {
 }
 
 app.on('window-all-closed', () => app.quit());
+app.on('before-quit', () => {
+  if (autoRecorder) autoRecorder.stop();
+});
 app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
