@@ -3,7 +3,7 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('mini', {
-  resolve: (room, quality) => ipcRenderer.invoke('mini-resolve', { room, quality }),
+  resolve: (room, quality, options = {}) => ipcRenderer.invoke('mini-resolve', { room, quality, options }),
   loadRooms: () => ipcRenderer.invoke('mini-load-rooms'),
   saveRooms: (data) => ipcRenderer.invoke('mini-save-rooms', data),
   setAutoRecordingConfig: (payload) => ipcRenderer.send('mini-auto-recording-config', payload),

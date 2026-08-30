@@ -1,0 +1,92 @@
+/* 纯净直播模式 CSS - 仅在直播间页面注入，验证码页面不会注入 */
+
+/* 隐藏顶部导航栏 */
+header,
+#douyin-header,
+[data-e2e="douyin-header"],
+[class*="douyin-header"] {
+  display: none !important;
+}
+
+/* 隐藏左侧导航 */
+nav,
+[data-e2e="live-side-nav"],
+[data-e2e="douyin-navigation"] {
+  display: none !important;
+}
+
+/* 隐藏右侧聊天区 */
+[data-e2e="chat-room"],
+[class*="chat-room"],
+[class*="ChatRoom"],
+.webcast-chatroom {
+  display: none !important;
+}
+
+/* 隐藏底部互动栏 */
+[data-e2e="bottom-bar"],
+[data-e2e="live-bottom-bar"],
+[class*="bottom-bar"],
+.webcast-bottom {
+  display: none !important;
+}
+
+/* 隐藏引导下载横幅 */
+[class*="download-app"],
+[class*="download-btn"],
+[class*="open-app"],
+[class*="Guide__"],
+.douyin-creator-login-mask {
+  display: none !important;
+}
+
+/* 禁止页面滚动 */
+body, html {
+  overflow: hidden !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  background: #000 !important;
+}
+
+/* 仅对播放器容器解除 transform 陷阱 */
+[data-e2e="live-room"],
+[data-e2e="living-container"],
+[class*="player-container"],
+[id*="xgplayer"] {
+  transform: none !important;
+  filter: none !important;
+}
+
+/* 直播核心容器撑满 WebView */
+[data-e2e="live-room"],
+.live-room-container {
+  position: fixed !important;
+  inset: 0 !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  max-width: none !important;
+  min-width: 0 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  z-index: 10 !important;
+}
+
+/* 播放器容器填满父级 */
+[data-e2e="living-container"],
+[class*="living-container"],
+[class*="player-container"],
+[id*="xgplayer"] {
+  position: absolute !important;
+  inset: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+  background: transparent !important;
+  border-radius: 0 !important;
+}
+
+/* 视频自适应裁剪 */
+video {
+  width: 100% !important;
+  height: 100% !important;
+  object-fit: cover !important;
+}

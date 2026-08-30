@@ -118,6 +118,11 @@ class LivePlayer {
     this.recoverTimer = null;
     this.stallTimer = null;
     this.resolvePromise = null;
+    this.resolveGeneration = 0;
+    this.streamCandidates = [];
+    this.candidateIndex = -1;
+    this.currentFlvUrl = '';
+    this.lastError = '';
     this.lastTime = 0;
     this.destroyed = false;
     this.STALL_MS = 12000;     // 卡顿判定放宽到 12s（原画高码率短卡顿是常态）
@@ -125,8 +130,10 @@ class LivePlayer {
     videoEl.muted = true;
     videoEl.addEventListener('playing', () => {
       this.updatePresence('live');
-      this.setState('live');
+      this.setState('live', '');
       this.attempts = 0;
+      this.lastError = '';
+      this.statusEl.title = '';
       this.lastTime = videoEl.currentTime;
       this.armStall();
     });
@@ -137,6 +144,26 @@ class LivePlayer {
   updatePresence(type) {
     this.room.presence = window.LivePresence.reducePresence(this.room.presence, { type });
     if (state.liveOnly) applyLiveOnly();
+  }
+
+  setCandidates(candidates, selectedUrl) {
+    const seen = new Set();
+    this.streamCandidates = (Array.isArray(candidates) ? candidates : [])
+      .filter((candidate) => candidate && typeof candidate.url === 'string' && candidate.url && !seen.has(candidate.url) && seen.add(candidate.url));
+    if (!this.streamCandidates.length && selectedUrl) this.streamCandidates = [{ url: selectedUrl }];
+    const selectedIndex = this.streamCandidates.findIndex((candidate) => candidate.url === selectedUrl);
+    this.candidateIndex = selectedIndex >= 0 ? selectedIndex : (this.streamCandidates.length ? 0 : -1);
+  }
+
+  tryNextCandidate() {
+    const nextIndex = this.candidateIndex + 1;
+    if (nextIndex < 0 || nextIndex >= this.streamCandidates.length) return false;
+    this.candidateIndex = nextIndex;
+    const candidate = this.streamCandidates[nextIndex];
+    this.recovering = false;
+    this.setState('loading', `切换备用线路 ${nextIndex + 1}/${this.streamCandidates.length}…`);
+    this.create(candidate.url);
+    return true;
   }
 
   setState(stateName, text) {
@@ -201,6 +228,8 @@ class LivePlayer {
       return;
     }
     this.destroyPlayer();
+    this.currentFlvUrl = flvUrl;
+    this.room.flvUrl = flvUrl;
     const player = window.mpegts.createPlayer(
       { type: 'flv', isLive: true, url: flvUrl },
       {
@@ -214,7 +243,13 @@ class LivePlayer {
         autoCleanupSourceBuffer: true,
       }
     );
-    player.on(window.mpegts.Events.ERROR, (type, detail) => this.recover(`mpegts:${type}:${detail}`));
+    this.player = player;
+    player.on(window.mpegts.Events.ERROR, (type, detail) => {
+      if (this.player !== player) return;
+      this.lastError = `mpegts:${type}:${detail}`;
+      this.statusEl.title = this.lastError;
+      this.recover(this.lastError);
+    });
     // 兜底元数据：所拉那档流自带的声明值（分辨率/标称帧率/编码码率）。
     // 只在房间接口没给源流标称值(room.src)时才展示 —— 它反映的是本地拉的档位，不是源流。
     player.on(window.mpegts.Events.MEDIA_INFO, (mi) => {
@@ -258,7 +293,6 @@ class LivePlayer {
     player.load();
     const p = this.videoEl.play();
     if (p && p.catch) p.catch(() => {});
-    this.player = player;
   }
 
   async start(flvUrl) {
@@ -266,31 +300,57 @@ class LivePlayer {
     this.recovering = false;
     if (this.room.presence.availability === 'live') this.updatePresence('reconnecting');
     if (flvUrl) {
+      this.setCandidates([{ url: flvUrl }], flvUrl);
       this.setState('loading', '连接直播流…');
       this.create(flvUrl);
     } else {
       this.setState('loading', '连接直播流…');
-      const ok = await this.reResolve();
+      const ok = await this.reResolve({
+        allowNavigationFallback: true,
+        forceRestart: true,
+        supersede: true,
+      });
       if (!ok && !this.destroyed) this.recover('initial'); // 首次没定 → 转入自愈重连（真下播会在重连中2次确认后显示未开播）
     }
   }
 
   async reResolve(options = {}) {
-    if (this.resolvePromise) return this.resolvePromise;
-    this.resolvePromise = this.resolveOnce(options).finally(() => {
-      this.resolvePromise = null;
+    if (this.resolvePromise && !options.supersede) return this.resolvePromise;
+    if (options.supersede) this.resolveGeneration += 1;
+    const generation = this.resolveGeneration;
+    const promise = this.resolveOnce(options, generation).finally(() => {
+      if (this.resolvePromise === promise) this.resolvePromise = null;
     });
-    return this.resolvePromise;
+    this.resolvePromise = promise;
+    return promise;
   }
 
-  async resolveOnce({ preservePlaying = false } = {}) {
+  async resolveOnce({
+    preservePlaying = false,
+    allowNavigationFallback = true,
+    forceNavigationFallback = false,
+    forceRestart = false,
+  } = {}, generation = this.resolveGeneration) {
     try {
-      const res = await window.mini.resolve(this.room.url, desiredQuality(this.room));
-      if (this.destroyed) return false;
+      const target = !allowNavigationFallback && this.room.kind === 'profile' && this.room.webRid
+        ? this.room.webRid
+        : this.room.url;
+      const res = await window.mini.resolve(target, desiredQuality(this.room), {
+        allowNavigationFallback,
+        forceNavigationFallback,
+      });
+      if (this.destroyed || generation !== this.resolveGeneration) return false;
+      if (res && res.deferred) return false;
+      if (this.room.kind === 'profile'
+        && !allowNavigationFallback
+        && res
+        && (res.status === 'offline' || res.status === 'ended')) return false;
       if (res && res.ok && res.flvUrl) {
         this.updatePresence('live');
+        this.setCandidates(res.flvCandidates, res.flvUrl);
+        const selected = this.streamCandidates[this.candidateIndex] || { url: res.flvUrl };
         this.room.webRid = res.webRid;
-        this.room.flvUrl = res.flvUrl;
+        this.room.flvUrl = selected.url;
         if (res.title) this.room.title = res.title;
         if (res.anchorName) this.room.anchor = res.anchorName;
         if (res.userCount) this.room.count = res.userCount;
@@ -298,7 +358,7 @@ class LivePlayer {
         updateCellMeta(this.room);
         this.updateStats();
         syncInfoMode();
-        if (!(preservePlaying && this.room.status === 'live')) this.create(res.flvUrl);
+        if (forceRestart || !(preservePlaying && this.room.status === 'live')) this.create(selected.url);
         return true;
       }
       if (res && (res.status === 'offline' || res.status === 'ended')) {
@@ -310,34 +370,65 @@ class LivePlayer {
         }
         return false;
       }
+      this.lastError = (res && res.reason) || 'resolve-unknown';
+      this.statusEl.title = this.lastError;
       if (!(preservePlaying && this.room.status === 'live')) this.updatePresence('unknown');
-    } catch {
+    } catch (error) {
+      if (this.destroyed || generation !== this.resolveGeneration) return false;
+      this.lastError = `resolve-throw:${error && error.message ? error.message : error}`;
+      this.statusEl.title = this.lastError;
       if (!(preservePlaying && this.room.status === 'live')) this.updatePresence('unknown');
     }
     return false;
   }
 
+  async restart({ allowNavigationFallback = true } = {}) {
+    this.clearTimers();
+    this.recovering = false;
+    this.attempts = 0;
+    const ok = await this.reResolve({
+      allowNavigationFallback,
+      forceRestart: true,
+      supersede: true,
+    });
+    if (!ok && !this.destroyed) {
+      if (this.player && this.room.status === 'live') {
+        this.lastTime = this.videoEl.currentTime;
+        this.armStall();
+      } else this.recover('manual');
+    }
+    return ok;
+  }
+
   // 自动追踪：未开播/已结束的格子定时重查，开播即起播
   recheck() {
-    if (this.destroyed) return;
-    if (this.room.presence.availability !== 'live' || this.room.status === 'loading') {
+    if (this.destroyed || this.recovering) return;
+    if (this.room.presence.availability !== 'live') {
       this.attempts = 0;
-      this.reResolve({ preservePlaying: true });
+      const allowNavigationFallback = this.room.kind === 'profile';
+      this.reResolve({ preservePlaying: true, allowNavigationFallback });
     }
   }
 
   recover(reason) {
     if (this.destroyed || this.recovering) return;
+    this.lastError = reason || this.lastError || 'retry';
+    this.statusEl.title = this.lastError;
     this.recovering = true;
     this.clearTimers();
     this.attempts += 1;
     this.updatePresence('reconnecting');
     this.setState('loading', '重连中…');
-    const delay = Math.min(this.attempts * 800, 10000); // 递增退避，封顶 10s，持续重连不放弃
+    const delay = Math.min(1000 * (2 ** (this.attempts - 1)), 30000);
     this.recoverTimer = setTimeout(async () => {
       this.recovering = false;
       if (this.destroyed) return;
-      const ok = await this.reResolve();
+      if (this.tryNextCandidate()) return;
+      const forceNavigationFallback = this.room.kind !== 'profile' && this.streamCandidates.length > 0;
+      const ok = await this.reResolve({
+        allowNavigationFallback: forceNavigationFallback || this.room.kind === 'profile' || this.attempts % 4 === 0,
+        forceNavigationFallback,
+      });
       // ok=true：已明确(在播已重播 / 连续2次确认未开播)；false：还没定 → 继续重连
       if (!ok) this.recover('retry');
     }, delay);
@@ -734,8 +825,7 @@ function soloAudio(id) {
 function reloadRoom(id) {
   const lp = players.get(id);
   if (!lp) return;
-  lp.attempts = 0;
-  lp.start('');
+  lp.restart();
 }
 function fullscreenCell(id) {
   const cell = gridEl.querySelector(`.cell[data-id="${id}"]`);
@@ -767,11 +857,13 @@ function openDetail(id) {
 function setGlobalQuality(q) {
   state.globalQuality = q;
   persist();
+  const targets = [];
   for (const room of state.rooms) {
     if (room.quality && room.quality !== 'auto') continue; // 有单格 override，不动
     const lp = players.get(room.id);
-    if (lp) { lp.attempts = 0; lp.start(''); }
+    if (lp) targets.push(lp);
   }
+  window.RoomRefresh.runRoomRefresh(targets, (player) => player.restart(), { concurrency: 3 });
 }
 
 function setRoomQuality(id, q) {
@@ -787,7 +879,7 @@ function setRoomQuality(id, q) {
   }
   persist();
   const lp = players.get(id);
-  if (lp) { lp.attempts = 0; lp.start(''); }
+  if (lp) lp.restart();
 }
 
 // 弹幕/礼物渲染。一批消息（{rid, items:[...]}）：评论→右侧面板，礼物→左侧面板，在线→顶部数字。
@@ -1129,11 +1221,13 @@ async function refreshAllRooms() {
   if (refreshAllRooms.running) return;
   refreshAllRooms.running = true;
   if (btnRefreshAll) btnRefreshAll.disabled = true;
-  const jobs = [...players.values()].map((player, index) => new Promise((resolve) => {
-    setTimeout(() => resolve(player.reResolve({ preservePlaying: true })), index * 250);
-  }));
+  toast('正在刷新全部直播间…', 12000);
   try {
-    await Promise.all(jobs);
+    await window.RoomRefresh.runRoomRefresh(
+      [...players.values()],
+      (player) => player.restart({ allowNavigationFallback: false }),
+      { concurrency: 4 },
+    );
     const liveCount = state.rooms.filter((room) => room.presence.availability === 'live').length;
     toast(`刷新完成，当前 ${liveCount} 个直播间在播`);
   } finally {
@@ -1220,7 +1314,7 @@ setInterval(async () => {
   for (const lp of players.values()) {
     if (lp.destroyed || lp.room.status !== 'live' || !lp.room.webRid) continue;
     try {
-      const res = await window.mini.resolve(lp.room.webRid, 'fluent');
+      const res = await window.mini.resolve(lp.room.webRid, 'fluent', { allowNavigationFallback: false });
       // 只取在线人数+源流标称参数，绝不因此改播放状态（接口这次抽风也不影响画面）
       if (res && res.userCount) lp.room.count = res.userCount;
       if (res && res.srcMeta && Object.keys(res.srcMeta).length) lp.room.src = res.srcMeta; // 主播中途改推流设置也能跟上

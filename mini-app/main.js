@@ -112,45 +112,88 @@ function waitLoad(win, url, timeoutMs = 12000) {
   });
 }
 
+function withTimeout(promise, timeoutMs, label) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error(`${label}-timeout`)), timeoutMs);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
+function invalidateResolver(win) {
+  if (!win || resolverWin !== win) return;
+  resolverWin = null;
+  resolverReady = null;
+  if (!win.isDestroyed()) {
+    try { win.destroy(); } catch {}
+  }
+}
+
 // 常驻隐藏解析页：停在 live.douyin.com（带 persist:douyin 登录），供 resolveStream 用。
 // 并发安全：用 promise 记忆化，开机多路 resolve 同时调用只会建 1 个窗口（同 ensureDanmuHub 写法）。
 function ensureResolver(douyinSession) {
   if (resolverReady && resolverWin && !resolverWin.isDestroyed()) return resolverReady;
-  resolverReady = (async () => {
-    resolverWin = new BrowserWindow({
+  const win = new BrowserWindow({
       show: false,
       webPreferences: { session: douyinSession, offscreen: false },
-    });
-    resolverWin.webContents.setUserAgent(DESKTOP_UA);
+  });
+  resolverWin = win;
+  win.once('closed', () => invalidateResolver(win));
+  win.on('unresponsive', () => invalidateResolver(win));
+  win.webContents.once('render-process-gone', () => invalidateResolver(win));
+  resolverReady = (async () => {
+    win.webContents.setUserAgent(DESKTOP_UA);
     // 常驻停在 live.douyin.com 首页，首页会自动播推荐直播间且带声 → 必须静音，否则漏「别的直播间」的音
-    resolverWin.webContents.setAudioMuted(true);
-    blockMediaIn(resolverWin); // 隐藏页不准拉视频流（省一路解码+带宽）
-    await waitLoad(resolverWin, 'https://live.douyin.com/');
+    win.webContents.setAudioMuted(true);
+    blockMediaIn(win); // 隐藏页不准拉视频流（省一路解码+带宽）
+    await waitLoad(win, 'https://live.douyin.com/');
     await new Promise((r) => setTimeout(r, 1200));
-    keepMediaPaused(resolverWin);
-  })();
+    keepMediaPaused(win);
+  })().catch((error) => {
+    invalidateResolver(win);
+    throw error;
+  });
   return resolverReady;
 }
 
 function resolverRunJs(code) {
-  return resolverWin.webContents.executeJavaScript(code, true);
+  const win = resolverWin;
+  if (!win || win.isDestroyed()) return Promise.reject(new Error('resolver-unavailable'));
+  return withTimeout(win.webContents.executeJavaScript(code, true), 12000, 'resolver-execute').catch((error) => {
+    invalidateResolver(win);
+    throw error;
+  });
 }
 
 // 独立「导航页」：主页解析/兜底抓取会导航离开 live 首页，单独开一页，
 // 不污染常驻页（常驻页保持在 live 首页，供 web/enter 接口并行 fetch）。
 let navWin = null;
+function invalidateNav(win) {
+  if (!win || navWin !== win) return;
+  navWin = null;
+  if (!win.isDestroyed()) {
+    try { win.destroy(); } catch {}
+  }
+}
+
 async function ensureNav(douyinSession) {
   if (navWin && !navWin.isDestroyed()) return;
-  navWin = new BrowserWindow({
+  const win = new BrowserWindow({
     show: false,
     webPreferences: { session: douyinSession, offscreen: false },
   });
-  navWin.webContents.setUserAgent(DESKTOP_UA);
+  navWin = win;
+  win.once('closed', () => invalidateNav(win));
+  win.on('unresponsive', () => invalidateNav(win));
+  win.webContents.once('render-process-gone', () => invalidateNav(win));
+  win.webContents.setUserAgent(DESKTOP_UA);
   // 兜底解析会导航到直播间页（自动播放带声）→ 同样静音，纯解析窗口不出声
-  navWin.webContents.setAudioMuted(true);
-  blockMediaIn(navWin); // 导航页只要 DOM/接口，不准拉视频流
-  navWin.webContents.on('did-finish-load', () => keepMediaPaused(navWin)); // 每次导航后都补一针
-  await waitLoad(navWin, 'about:blank', 3000);
+  win.webContents.setAudioMuted(true);
+  blockMediaIn(win); // 导航页只要 DOM/接口，不准拉视频流
+  win.webContents.on('did-finish-load', () => keepMediaPaused(win)); // 每次导航后都补一针
+  await waitLoad(win, 'about:blank', 3000);
 }
 
 // 导航页串行锁：导航会整页跳转，并发会互相打架，必须排队。
@@ -158,9 +201,17 @@ let navChain = Promise.resolve();
 function withNav(fn) {
   const run = navChain.then(async () => {
     await ensureNav(session.fromPartition('persist:douyin'));
-    const navigate = (url) => waitLoad(navWin, url);
-    const navRunJs = (code) => navWin.webContents.executeJavaScript(code, true);
-    return fn(navigate, navRunJs);
+    const win = navWin;
+    const navigate = (url) => waitLoad(win, url);
+    const navRunJs = (code) => withTimeout(win.webContents.executeJavaScript(code, true), 12000, 'nav-execute')
+      .catch((error) => {
+        invalidateNav(win);
+        throw error;
+      });
+    return withTimeout(fn(navigate, navRunJs), 26000, 'nav-run').catch((error) => {
+      invalidateNav(win);
+      throw error;
+    });
   });
   navChain = run.catch(() => {});
   return run;
@@ -207,6 +258,7 @@ async function createWindow() {
   ensureAutoRecorder(douyinSession);
 
   mainWin = new BrowserWindow({
+    show: !process.argv.includes('--diagnostic-hidden'),
     width: 1440,
     height: 900,
     backgroundColor: '#0b0d12',
@@ -234,10 +286,14 @@ async function createWindow() {
 // —— IPC —— //
 
 // 解析一个直播间链接/号 → flv（API 并行，导航串行）
-ipcMain.handle('mini-resolve', async (_evt, { room, quality }) => {
+ipcMain.handle('mini-resolve', async (_evt, { room, quality, options }) => {
   try {
     await ensureResolver(session.fromPartition('persist:douyin'));
-    return await resolveStream(makeCtx(), room, { quality: quality || 'hd' });
+    return await resolveStream(makeCtx(), room, {
+      quality: quality || 'hd',
+      allowNavigationFallback: !options || options.allowNavigationFallback !== false,
+      forceNavigationFallback: Boolean(options && options.forceNavigationFallback),
+    });
   } catch (e) {
     return { ok: false, status: 'unknown', reason: `main-throw:${e && e.message}` };
   }
@@ -571,8 +627,10 @@ if (!app.requestSingleInstanceLock()) {
   app.whenReady().then(() => {
     createWindow();
     // 启动稳定后自动查一次，之后每 6 小时查一次（有新版就提示，不用你手动重下）
-    setTimeout(() => checkForUpdate(false), 8000);
-    setInterval(() => checkForUpdate(false), 6 * 3600 * 1000);
+    if (!process.argv.includes('--diagnostic-hidden')) {
+      setTimeout(() => checkForUpdate(false), 8000);
+      setInterval(() => checkForUpdate(false), 6 * 3600 * 1000);
+    }
   }).catch((e) => console.error('[mini] startup', e));
 }
 

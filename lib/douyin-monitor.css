@@ -1,0 +1,21 @@
+/* 基础监控 CSS - 仅精准隐藏下载引导，其他全部保留 */
+
+body, html {
+  margin: 0;
+  padding: 0;
+}
+
+/* 仅屏蔽明确的下载App引导浮层 */
+[class*="download-app"],
+[class*="download-btn"],
+[class*="open-app"],
+[class*="Guide__"] {
+  display: none !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
+/* 隐藏可能横跨全屏阻碍点击的全局透明遮罩 */
+.douyin-creator-login-mask {
+  display: none !important;
+}
