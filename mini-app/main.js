@@ -1,14 +1,16 @@
 'use strict';
 
-// 全新极简多宫格抖音直播墙。
-// 设计目标：打开就看到画面、绝不撞验证码、不要登录墙。
-// 技术：抖音 web/enter 接口取 flv 拉流 → 单 renderer 里每格一个 <video> + mpegts.js 直接播。
-// 复用主 app 的 persist:douyin 登录态（同一 userData），解析更稳、不触发验证码。
+// 多平台直播墙：按平台解析 FLV 直播流，在单 renderer 中播放并独立管理录制。
 
 const path = require('path');
 const fs = require('fs');
 const { app, BrowserWindow, WebContentsView, session, ipcMain, dialog, shell, net, Menu } = require('electron');
 const { resolveStream } = require('../lib/douyin-stream');
+const xiaohongshuStream = require('../lib/xiaohongshu-stream');
+const { PLATFORMS, normalizePlatform, roomUrl } = require('../lib/live-platform');
+const { createPlatformWindows } = require('../lib/platform-windows');
+const { createRoomSearch } = require('../lib/room-search');
+const { createAudienceMonitor } = require('../lib/xiaohongshu-audience');
 const { createAutoRecorder, createElectronStreamOpener } = require('../lib/auto-recorder');
 const { buildRecordingFilePath } = require('../lib/recording-settings');
 
@@ -36,8 +38,26 @@ const CDN_HOST_RE = /(\.douyincdn\.com|\.douyin\.com|\.amemv\.com|\.bytedance\.|
 let mainWin = null;
 let resolverWin = null;
 let resolverReady = null; // Promise：并发调用共享同一次建窗，避免开机 8 路并发各建一窗漏窗
-let autoRecorder = null;
-let pendingRecordingConfig = null;
+const autoRecorders = new Map();
+let activePlatform = 'douyin';
+const platformWindows = createPlatformWindows({
+  BrowserWindow, session, userAgent: DESKTOP_UA, mobileUserAgent: MOBILE_UA,
+  onRoomSelected: (payload) => {
+    if (payload.platform !== activePlatform || !mainWin || mainWin.isDestroyed()) return;
+    mainWin.webContents.send('mini-room-selected', payload);
+    mainWin.show();
+    mainWin.focus();
+  },
+  onLoginStatus: (payload) => {
+    if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('login-status', payload);
+  },
+});
+const roomSearch = createRoomSearch({ BrowserWindow, session, userAgent: DESKTOP_UA, prepareWindow: blockMediaIn });
+const audienceMonitor = createAudienceMonitor({ BrowserWindow, session, userAgent: DESKTOP_UA, prepareWindow: blockMediaIn,
+  onCount: (payload) => {
+    if (activePlatform === 'xiaohongshu' && mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('mini-audience', payload);
+  },
+});
 
 function roomsStorePath() {
   return path.join(app.getPath('userData'), 'mini_rooms.json');
@@ -46,7 +66,7 @@ function loadRooms() {
   try {
     return JSON.parse(fs.readFileSync(roomsStorePath(), 'utf-8'));
   } catch {
-    return { rooms: [], layout: 4 };
+    return null;
   }
 }
 function saveRooms(data) {
@@ -54,6 +74,7 @@ function saveRooms(data) {
     fs.writeFileSync(roomsStorePath(), JSON.stringify(data || { rooms: [] }, null, 2), 'utf-8');
   } catch (e) {
     console.error('[mini] saveRooms failed', e);
+    throw e;
   }
 }
 
@@ -63,7 +84,11 @@ function saveRooms(data) {
 // 按 webContentsId 精准拦掉这些窗口的媒体请求（主窗口拉流/详情窗真实页完全不受影响）。
 const mediaBlockedWC = new Set();
 function blockMediaIn(win) {
-  if (win && !win.isDestroyed()) mediaBlockedWC.add(win.webContents.id);
+  if (win && !win.isDestroyed()) {
+    const id = win.webContents.id;
+    mediaBlockedWC.add(id);
+    win.once('closed', () => mediaBlockedWC.delete(id));
+  }
 }
 // 兜底：把已缓冲的也停掉（网络拦了之后 decode 兜底停干净）
 const PAUSE_MEDIA_JS =
@@ -83,15 +108,16 @@ function installCdnHeaderRewrite(sess) {
   });
   sess.webRequest.onBeforeSendHeaders((details, cb) => {
     const headers = details.requestHeaders;
-    if (CDN_HOST_RE.test(details.url) && /\.flv|\.m3u8|\.ts(\?|$)/i.test(details.url)) {
-      headers['Referer'] = 'https://live.douyin.com/';
-      headers['Origin'] = 'https://live.douyin.com';
+    const isXhs = /(^|\.)xhscdn\.com$/i.test(new URL(details.url).hostname);
+    if ((isXhs || CDN_HOST_RE.test(details.url)) && /\.flv|\.m3u8|\.ts(\?|$)/i.test(details.url)) {
+      headers['Referer'] = isXhs ? 'https://www.xiaohongshu.com/' : 'https://live.douyin.com/';
+      headers['Origin'] = isXhs ? 'https://www.xiaohongshu.com' : 'https://live.douyin.com';
       headers['User-Agent'] = DESKTOP_UA;
     }
     cb({ requestHeaders: headers });
   });
   sess.webRequest.onHeadersReceived((details, cb) => {
-    if (CDN_HOST_RE.test(details.url)) {
+    if (CDN_HOST_RE.test(details.url) || /(^|\.)xhscdn\.com$/i.test(new URL(details.url).hostname)) {
       const responseHeaders = { ...details.responseHeaders };
       responseHeaders['Access-Control-Allow-Origin'] = ['*'];
       responseHeaders['Access-Control-Allow-Headers'] = ['*'];
@@ -222,47 +248,56 @@ function makeCtx() {
   return { apiRunJs: resolverRunJs, withNav };
 }
 
-function ensureAutoRecorder(douyinSession) {
-  if (autoRecorder) return autoRecorder;
-  autoRecorder = createAutoRecorder({
-    resolveRoom: async (roomUrl, quality) => {
-      await ensureResolver(douyinSession);
-      return resolveStream(makeCtx(), roomUrl, { quality });
-    },
+async function resolvePlatformStream(platform, input, quality, options = {}) {
+  if (platform === 'xiaohongshu') {
+    const ses = session.fromPartition(PLATFORMS.xiaohongshu.partition);
+    return xiaohongshuStream.resolveStream((url, init) => ses.fetch(url, init), input, { quality });
+  }
+  await ensureResolver(session.fromPartition(PLATFORMS.douyin.partition));
+  return resolveStream(makeCtx(), input, {
+    quality,
+    allowNavigationFallback: options.allowNavigationFallback !== false,
+    forceNavigationFallback: Boolean(options.forceNavigationFallback),
+  });
+}
+
+function ensureAutoRecorder(platform) {
+  if (autoRecorders.has(platform)) return autoRecorders.get(platform);
+  const autoRecorder = createAutoRecorder({
+    resolveRoom: (url, quality) => resolvePlatformStream(platform, url, quality),
     openStream: createElectronStreamOpener({
       net,
-      session: douyinSession,
+      session: session.fromPartition(PLATFORMS[platform].partition),
       userAgent: DESKTOP_UA,
+      referer: platform === 'xiaohongshu' ? PLATFORMS.xiaohongshu.home : 'https://live.douyin.com/',
     }),
     createOutput: (filePath) => {
       fs.mkdirSync(path.dirname(filePath), { recursive: true });
       return fs.createWriteStream(filePath, { flags: 'wx' });
     },
-    buildFilePath: (room, now) => buildRecordingFilePath(app.getPath('videos'), room, now),
+    buildFilePath: (room, now) => buildRecordingFilePath(app.getPath('videos'), { ...room, platform }, now),
     onStatus: (payload) => {
-      if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('recording-status', payload);
+      if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('recording-status', { ...payload, platform });
     },
   });
+  autoRecorders.set(platform, autoRecorder);
   autoRecorder.start();
-  if (pendingRecordingConfig) {
-    autoRecorder.updateConfig(pendingRecordingConfig);
-    pendingRecordingConfig = null;
-  }
   return autoRecorder;
 }
 
 async function createWindow() {
   const douyinSession = session.fromPartition('persist:douyin');
   installCdnHeaderRewrite(douyinSession);
+  installCdnHeaderRewrite(session.fromPartition(PLATFORMS.xiaohongshu.partition));
   douyinSession.setUserAgent(DESKTOP_UA);
-  ensureAutoRecorder(douyinSession);
+  session.fromPartition(PLATFORMS.xiaohongshu.partition).setUserAgent(DESKTOP_UA);
 
   mainWin = new BrowserWindow({
     show: !process.argv.includes('--diagnostic-hidden'),
     width: 1440,
     height: 900,
     backgroundColor: '#0b0d12',
-    title: '抖音多宫格直播墙',
+    title: '多平台直播墙',
     // 隐藏系统标题栏、保留红绿灯：工具栏顶到最上一行，省出一整行给画面
     titleBarStyle: 'hiddenInset',
     autoHideMenuBar: true, // Windows/Linux：隐藏菜单栏(File/Edit…)
@@ -280,20 +315,14 @@ async function createWindow() {
   // 否则隐藏页残留会挡住 window-all-closed，导致二次打开被单实例锁挡在外面
   mainWin.on('closed', () => { try { app.quit(); } catch { /* ignore */ } });
 
-  await ensureResolver(douyinSession);
 }
 
 // —— IPC —— //
 
 // 解析一个直播间链接/号 → flv（API 并行，导航串行）
-ipcMain.handle('mini-resolve', async (_evt, { room, quality, options }) => {
+ipcMain.handle('mini-resolve', async (_evt, { room, quality, options = {} }) => {
   try {
-    await ensureResolver(session.fromPartition('persist:douyin'));
-    return await resolveStream(makeCtx(), room, {
-      quality: quality || 'hd',
-      allowNavigationFallback: !options || options.allowNavigationFallback !== false,
-      forceNavigationFallback: Boolean(options && options.forceNavigationFallback),
-    });
+    return await resolvePlatformStream(normalizePlatform(options.platform), room, quality || 'hd', options);
   } catch (e) {
     return { ok: false, status: 'unknown', reason: `main-throw:${e && e.message}` };
   }
@@ -302,13 +331,27 @@ ipcMain.handle('mini-resolve', async (_evt, { room, quality, options }) => {
 ipcMain.handle('mini-load-rooms', () => loadRooms());
 ipcMain.handle('mini-save-rooms', (_evt, data) => { saveRooms(data); return { ok: true }; });
 ipcMain.on('mini-auto-recording-config', (_evt, payload) => {
-  if (!autoRecorder) {
-    pendingRecordingConfig = payload;
-    return;
-  }
-  autoRecorder.updateConfig(payload).catch((error) => {
+  const platform = normalizePlatform(payload && payload.platform);
+  ensureAutoRecorder(platform).updateConfig(payload).catch((error) => {
     console.error('[mini] update recording config failed', error);
   });
+});
+ipcMain.on('mini-platform', (_evt, value) => {
+  roomSearch.cancel();
+  audienceMonitor.stop();
+  activePlatform = normalizePlatform(value);
+  platformWindows.closeSearch();
+  platformWindows.closeDetail();
+  if (mainWin && !mainWin.isDestroyed()) mainWin.setTitle(`${PLATFORMS[activePlatform].name}直播墙`);
+});
+ipcMain.handle('mini-search', (_evt, { keyword, platform }) => {
+  if (normalizePlatform(platform) !== activePlatform) return { status: 'cancelled', candidates: [] };
+  return roomSearch.search(keyword, platform);
+});
+ipcMain.on('mini-search-cancel', () => roomSearch.cancel());
+ipcMain.on('mini-watch-audience', (_evt, { platform, rooms }) => {
+  if (platform !== activePlatform) return;
+  audienceMonitor.setRooms(platform === 'xiaohongshu' ? rooms : []);
 });
 
 // —— 信息模式：弹幕 WS 直连（一个 danmuHub 页扛多路） —— //
@@ -369,9 +412,10 @@ function ensureDanmuHub() {
 }
 
 async function dyConnect(rid) {
-  if (!rid || connectedRids.has(rid)) return;
+  if (!infoMode || !rid || !infoRids.includes(rid) || connectedRids.has(rid)) return;
   connectedRids.add(rid);
   await ensureDanmuHub();
+  if (!infoMode || !infoRids.includes(rid) || !connectedRids.has(rid)) return;
   if (danmuHub && !danmuHub.isDestroyed()) {
     danmuHub.webContents
       .executeJavaScript(`window.__dyConnect&&window.__dyConnect(${JSON.stringify(rid)},${JSON.stringify(rid)})`)
@@ -405,93 +449,14 @@ ipcMain.on('mini-info-mode', (_evt, { on, rids }) => {
   reconcileDanmu();
 });
 
-// —— 双击详情：独立浮窗显示手机版真实直播间（不遮挡网格，别的间照常看，限 1 个） —— //
-const blockAppScheme = (url) => /^(bytedance|snssdk|aweme|sslocal|bdscheme|zhihu):/i.test(url || '');
-
-let detailWin = null;
-let detailRid = '';
-
-ipcMain.on('open-detail', (_evt, { rid, title }) => {
-  if (!rid) return;
-  // 已有详情窗 → 同一个只聚焦不刷新；不同则换房（限 1 个）
-  if (detailWin && !detailWin.isDestroyed()) {
-    detailWin.show();
-    detailWin.focus();
-    if (detailRid !== String(rid)) {
-      detailRid = String(rid);
-      detailWin.setTitle(title || `直播间 ${rid}`);
-      detailWin.webContents.loadURL(`https://live.douyin.com/${rid}`);
-    }
-    return;
-  }
-  detailRid = String(rid);
-  detailWin = new BrowserWindow({
-    width: 440,
-    height: 900,
-    title: title || `直播间 ${rid}`,
-    backgroundColor: '#000',
-    webPreferences: {
-      session: session.fromPartition('persist:douyin'),
-      contextIsolation: true,
-      nodeIntegration: false,
-    },
-  });
-  // 手机版 UA：竖版手机直播界面（礼物/榜单/目标全有）
-  detailWin.webContents.setUserAgent(MOBILE_UA);
-  detailWin.webContents.setWindowOpenHandler(({ url }) => {
-    if (!blockAppScheme(url) && /douyin\.com/.test(url)) detailWin.webContents.loadURL(url);
-    return { action: 'deny' };
-  });
-  detailWin.webContents.on('will-navigate', (e, url) => { if (blockAppScheme(url)) e.preventDefault(); });
-  detailWin.loadURL(`https://live.douyin.com/${rid}`);
-  detailWin.on('closed', () => { detailWin = null; detailRid = ''; });
+// 搜索、登录和详情窗口按平台使用独立会话。
+ipcMain.on('open-detail', (_evt, { rid, title, platform, url }) => {
+  const selectedPlatform = normalizePlatform(platform);
+  platformWindows.openDetail(url || roomUrl(rid, selectedPlatform), title, selectedPlatform);
 });
-
-ipcMain.on('close-detail', () => {
-  if (detailWin && !detailWin.isDestroyed()) detailWin.close();
-});
-
-// —— 扫码登录抖音（登录后真实页可看原画 + 发言；登录态存 persist:douyin） —— //
-async function isLoggedIn() {
-  try {
-    const ses = session.fromPartition('persist:douyin');
-    const cookies = await ses.cookies.get({ domain: '.douyin.com' });
-    return cookies.some((c) => /^(sessionid|sessionid_ss)$/i.test(c.name) && c.value);
-  } catch { return false; }
-}
-function pushLoginStatus() {
-  isLoggedIn().then((ok) => {
-    if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('login-status', ok);
-  });
-}
-ipcMain.handle('login-status', () => isLoggedIn());
-
-let loginWin = null;
-ipcMain.on('open-login', () => {
-  if (loginWin && !loginWin.isDestroyed()) { loginWin.focus(); return; }
-  loginWin = new BrowserWindow({
-    width: 520,
-    height: 720,
-    title: '扫码登录抖音',
-    backgroundColor: '#fff',
-    webPreferences: {
-      session: session.fromPartition('persist:douyin'),
-      contextIsolation: true,
-      nodeIntegration: false,
-    },
-  });
-  loginWin.webContents.setUserAgent(DESKTOP_UA);
-  loginWin.webContents.setWindowOpenHandler(({ url }) => {
-    if (!blockAppScheme(url) && /douyin\.com/.test(url)) loginWin.webContents.loadURL(url);
-    return { action: 'deny' };
-  });
-  loginWin.webContents.on('will-navigate', (e, url) => { if (blockAppScheme(url)) e.preventDefault(); });
-  // 登录成功后页面会跳转/刷新，借此回推登录状态
-  loginWin.webContents.on('did-navigate', () => pushLoginStatus());
-  loginWin.webContents.on('did-frame-navigate', () => pushLoginStatus());
-  loginWin.loadURL('https://www.douyin.com/');
-  loginWin.on('closed', () => { loginWin = null; pushLoginStatus(); });
-});
+ipcMain.on('close-detail', () => platformWindows.closeDetail());
+ipcMain.handle('login-status', (_evt, platform) => platformWindows.loginStatus(platform));
+ipcMain.on('open-login', (_evt, platform) => platformWindows.openLogin(platform));
 
 // —— 自动更新（走国内 GitHub 加速镜像，免梯子）——
 // GitHub 在国内被墙，api.github.com / github.com 直连必失败。改为：
@@ -636,6 +601,8 @@ if (!app.requestSingleInstanceLock()) {
 
 app.on('window-all-closed', () => app.quit());
 app.on('before-quit', () => {
-  if (autoRecorder) autoRecorder.stop();
+  roomSearch.cancel();
+  audienceMonitor.stop();
+  for (const autoRecorder of autoRecorders.values()) autoRecorder.stop();
 });
 app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });

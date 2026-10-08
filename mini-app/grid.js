@@ -9,10 +9,23 @@ const gridEl = document.getElementById('grid');
 const emptyHint = document.getElementById('empty-hint');
 const inputEl = document.getElementById('room-input');
 const btnAdd = document.getElementById('btn-add');
+const searchPanel = document.getElementById('room-search');
+const searchTitle = document.getElementById('search-title');
+const searchMessage = document.getElementById('search-message');
+const searchList = document.getElementById('search-list');
+const searchLogin = document.getElementById('search-login');
+const searchRetry = document.getElementById('search-retry');
+let searchGeneration = 0;
+let searchResult = { keyword: '', platform: '', status: '', candidates: [] };
 const btnBack = document.getElementById('btn-back');
 const btnRefreshAll = document.getElementById('btn-refresh-all');
 const globalQualityEl = document.getElementById('global-quality');
 const toastEl = document.getElementById('toast');
+const platformSelect = document.getElementById('platform-select');
+const platformApi = window.LivePlatform;
+let platformStore = platformApi.restoreStore(null);
+let saveChain = Promise.resolve();
+const recordingByPlatform = new Map();
 
 // 默认直播间（首次打开自动带上，老板开箱即看）。可在「直播间管理」里增删。
 const DEFAULT_LIBRARY = [
@@ -46,6 +59,7 @@ const autoRecordingEnabledEl = document.getElementById('auto-recording-enabled')
 const autoRecordingDurationEl = document.getElementById('auto-recording-duration');
 
 const state = {
+  platform: 'douyin',
   library: [],   // [{ id, name, brand, url, kind }]
   rooms: [],     // 上墙(播放中) [{ id, name, brand, url, kind, webRid, title, anchor, count, flvUrl, status, quality }]
   cols: 'auto',
@@ -74,14 +88,8 @@ function uid() {
   return 'r' + Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-4);
 }
 
-function isProfileUrl(u) { return /douyin\.com\/user\//i.test(String(u || '')); }
-function classifyInput(u) {
-  const s = String(u || '').trim();
-  if (!s) return 'invalid';
-  if (isProfileUrl(s)) return 'profile';
-  if (/live\.douyin\.com\/\d+/i.test(s) || /^\d{6,}$/.test(s)) return 'live';
-  if (/douyin\.com/i.test(s)) return 'live'; // 其它抖音链接交给后端兜底解析
-  return 'invalid';
+function classifyInput(value) {
+  return platformApi.parseInput(value, state.platform).kind;
 }
 
 function autoQuality() {
@@ -174,7 +182,9 @@ class LivePlayer {
     if (t && text != null) t.textContent = text;
     // 非直播状态：清掉在线/分辨率/帧率/码率 + 红点（下播了就不显示这些）
     const live = stateName === 'live';
-    if (!live) { this.room.stats = {}; this.room.src = null; this.room.count = ''; }
+    if (!live) { this.room.stats = {}; this.room.src = null; this.room.count = ''; this.room.countExact = false; }
+    if (stateName === 'offline') syncInfoMode();
+    updateCellMeta(this.room);
     this.updateStats();
     const cell = gridEl.querySelector(`.cell[data-id="${this.room.id}"]`);
     if (cell) {
@@ -197,7 +207,8 @@ class LivePlayer {
     const src = this.room.src || {};
     const fmtRate = (kbps) => (kbps >= 1000 ? `${(kbps / 1000).toFixed(1)}Mbps` : `${kbps}kbps`);
     const parts = [];
-    if (this.room.count) parts.push(`${this.room.count} 在线`);
+    const audience = audienceText(this.room);
+    if (audience) parts.push(audience);
     const w = src.w || st.w, h = src.h || st.h;
     if (w && h) parts.push(`${w}×${h}`);
     const fps = src.fps || st.fps;
@@ -338,6 +349,7 @@ class LivePlayer {
       const res = await window.mini.resolve(target, desiredQuality(this.room), {
         allowNavigationFallback,
         forceNavigationFallback,
+        platform: this.room.platform,
       });
       if (this.destroyed || generation !== this.resolveGeneration) return false;
       if (res && res.deferred) return false;
@@ -350,10 +362,18 @@ class LivePlayer {
         this.setCandidates(res.flvCandidates, res.flvUrl);
         const selected = this.streamCandidates[this.candidateIndex] || { url: res.flvUrl };
         this.room.webRid = res.webRid;
+        this.room.liveUrl = res.roomUrl || platformApi.roomUrl(res.webRid, this.room.platform);
         this.room.flvUrl = selected.url;
         if (res.title) this.room.title = res.title;
         if (res.anchorName) this.room.anchor = res.anchorName;
-        if (res.userCount) this.room.count = res.userCount;
+        const libraryRoom = findLib(this.room.id);
+        if (libraryRoom && !libraryRoom.name && res.anchorName) {
+          libraryRoom.name = res.anchorName;
+          this.room.name = res.anchorName;
+          persist();
+          renderLibList();
+        }
+        applyAudience(this.room, res);
         if (res.srcMeta && Object.keys(res.srcMeta).length) this.room.src = res.srcMeta; // 源流标称参数（与本地无关）
         updateCellMeta(this.room);
         this.updateStats();
@@ -372,7 +392,13 @@ class LivePlayer {
       }
       this.lastError = (res && res.reason) || 'resolve-unknown';
       this.statusEl.title = this.lastError;
-      if (!(preservePlaying && this.room.status === 'live')) this.updatePresence('unknown');
+      if (!(preservePlaying && this.room.status === 'live')) {
+        this.updatePresence('unknown');
+        if (res && res.message) {
+          this.setState('error', res.message);
+          return true;
+        }
+      }
     } catch (error) {
       if (this.destroyed || generation !== this.resolveGeneration) return false;
       this.lastError = `resolve-throw:${error && error.message ? error.message : error}`;
@@ -510,6 +536,20 @@ function escapeHtml(s) {
 
 const QUALITY_LABEL = { auto: '自动', origin: '原画', hd: '高清', sd: '标清', fluent: '流畅' };
 
+function applyAudience(room, result) {
+  if (!Object.prototype.hasOwnProperty.call(result, 'userCount')) return;
+  if (room.countExact && !result.countExact && Date.now() - room.countObservedAt < 60000) return;
+  room.count = result.userCount == null ? '' : String(result.userCount);
+  room.countLabel = result.countLabel || '在线';
+  room.countExact = result.countExact === true;
+  room.countObservedAt = result.observedAt || Date.now();
+}
+
+function audienceText(room) {
+  if (room.count !== '' && room.count != null) return `${room.count} ${room.countLabel || '在线'}`;
+  return room.status === 'live' ? '人数暂不可用' : '';
+}
+
 function cellTemplate(room) {
   const isSolo = state.soloId === room.id;
   const label = room.name || room.title || room.anchor || room.url;
@@ -518,7 +558,7 @@ function cellTemplate(room) {
   <article class="cell${isSolo ? ' solo-audio' : ''}" data-id="${room.id}" data-rid="${room.webRid || ''}">
     <div class="cell-infobar">
       <span class="cell-name">${escapeHtml(label)}</span>
-      <span class="cell-online">${room.count ? escapeHtml(room.count) + ' 在线' : ''}</span>
+      <span class="cell-online">${escapeHtml(audienceText(room))}</span>
     </div>
     <div class="cell-stage">
       <div class="cell-gifts"></div>
@@ -563,9 +603,9 @@ function updateCellMeta(room) {
   const nameEl = cell.querySelector('.cell-name');
   const onlineEl = cell.querySelector('.cell-online');
   if (titleEl) titleEl.textContent = label;
-  if (countEl) countEl.textContent = room.count ? `${room.count} 人` : '';
+  if (countEl) countEl.textContent = audienceText(room);
   if (nameEl) nameEl.textContent = label;
-  if (onlineEl) onlineEl.textContent = room.count ? `${room.count} 在线` : '';
+  if (onlineEl) onlineEl.textContent = audienceText(room);
 }
 
 
@@ -614,10 +654,17 @@ function findLib(id) { return state.library.find((x) => x.id === id); }
 function normUrl(u) { return String(u || '').trim().replace(/[?#].*$/, ''); }
 
 function addToLibrary(name, url, brand) {
-  const u = String(url || '').trim();
-  if (classifyInput(u) === 'invalid') { toast('链接无法识别（要主播主页或直播间链接/房间号）'); return null; }
+  const parsed = platformApi.parseInput(url, state.platform);
+  if (parsed.kind === 'keyword') { searchRooms(parsed.keyword); return null; }
+  if (parsed.kind === 'invalid') { toast(`请输入${platformApi.PLATFORMS[state.platform].name}直播链接或直播间名字`); return null; }
+  const u = parsed.url;
   const exists = state.library.find((x) => normUrl(x.url) === normUrl(u));
-  if (exists) return exists;
+  if (exists) {
+    exists.url = u;
+    if (!exists.name && name) exists.name = name.trim();
+    persist();
+    return exists;
+  }
   const item = { id: uid(), name: (name || '').trim(), brand: (brand || '').trim(), url: u, kind: classifyInput(u) };
   state.library.push(item);
   persist();
@@ -656,7 +703,7 @@ function addCellForRoom(room, delayMs = 0) {
 
 function makeRoom(lib) {
   return {
-    id: lib.id, name: lib.name, brand: lib.brand, url: lib.url, kind: lib.kind,
+    id: lib.id, name: lib.name, brand: lib.brand, url: lib.url, kind: lib.kind, platform: state.platform,
     webRid: '', title: '', anchor: '', count: '', flvUrl: '', status: 'loading',
     presence: window.LivePresence.createPresence(),
     quality: savedQuality[lib.id] || '',
@@ -701,7 +748,8 @@ function toggleWall(libId) {
 // 顶栏直接添加：进库并上墙
 function addFromInput(rawUrl, name) {
   const kind = classifyInput(rawUrl);
-  if (kind === 'invalid') { toast('链接无法识别'); return false; }
+  if (kind === 'keyword') { searchRooms(rawUrl); return true; }
+  if (kind === 'invalid') { toast(`请输入${platformApi.PLATFORMS[state.platform].name}直播间名字、直播链接或房间号`); return false; }
   const item = addToLibrary(name || '', rawUrl, '');
   if (!item) return false;
   if (!isOnWall(item.id)) putOnWall(item.id);
@@ -841,7 +889,9 @@ function wallRids() {
 }
 // 弹幕/礼物/战况任一开着才连弹幕 WS；全关 = 一条连接都不建，零开销
 function syncInfoMode() {
-  const on = !!(state.showDanmu || state.showGifts || state.showBattle);
+  window.mini.watchAudience(state.platform, state.platform === 'xiaohongshu'
+    ? state.rooms.filter((room) => room.webRid && room.status !== 'offline').map((room) => ({ id: room.id, url: room.liveUrl || room.url })) : []);
+  const on = state.platform === 'douyin' && !!(state.showDanmu || state.showGifts || state.showBattle);
   window.mini.setInfoMode(on, on ? wallRids() : []);
 }
 
@@ -850,8 +900,9 @@ function syncInfoMode() {
 function openDetail(id) {
   const room = state.rooms.find((r) => r.id === id);
   if (!room) return;
-  if (!room.webRid) { toast('该直播间还没连上，稍等一下再双击'); return; }
-  window.mini.openDetail(room.webRid, room.name || room.title || '');
+  const url = platformApi.selectedRoomUrl(room.url, state.platform) || platformApi.roomUrl(room.webRid, state.platform);
+  if (!url) { toast('该直播间还没连上，稍等一下再双击'); return; }
+  window.mini.openDetail(room.webRid, room.name || room.title || '', state.platform, url);
 }
 
 function setGlobalQuality(q) {
@@ -980,9 +1031,9 @@ function appendGift(cell, it) {
 }
 
 function updateOnlineCell(cell, rid, online) {
-  if (!online) return;
+  if (online == null || online === '') return;
   const room = state.rooms.find((r) => r.webRid === rid);
-  if (room) room.count = online;
+  if (room) { room.count = String(online); room.countLabel = '在线'; }
   const onlineEl = cell.querySelector('.cell-online');
   if (onlineEl) onlineEl.textContent = `${online} 在线`;
 }
@@ -1009,13 +1060,14 @@ function applyAutoRecordingControls() {
 
 function syncAutoRecordingConfig() {
   window.mini.setAutoRecordingConfig({
+    platform: state.platform,
     library: state.library,
     autoRecording: state.autoRecording,
   });
 }
 
 function persist() {
-  const quality = {};
+  const quality = { ...savedQuality };
   for (const r of state.rooms) if (r.quality) quality[r.id] = r.quality;
   const snapshot = {
     cols: state.cols,
@@ -1030,13 +1082,26 @@ function persist() {
     autoRecording: state.autoRecording,
     quality,
   };
-  window.mini.saveRooms(snapshot);
+  savedQuality = quality;
+  platformStore = platformApi.saveProfile(platformStore, state.platform, snapshot);
+  const store = JSON.parse(JSON.stringify(platformStore));
+  saveChain = saveChain.catch(() => {}).then(() => window.mini.saveRooms(store));
+  saveChain.catch(() => toast('设置保存失败，请检查磁盘空间', 5000));
   syncAutoRecordingConfig();
+  return saveChain;
 }
 
 // —— 事件 —— //
 btnAdd.addEventListener('click', () => { if (addFromInput(inputEl.value)) inputEl.value = ''; });
-inputEl.addEventListener('keydown', (e) => { if (e.key === 'Enter' && addFromInput(inputEl.value)) inputEl.value = ''; });
+inputEl.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.isComposing && addFromInput(inputEl.value)) inputEl.value = ''; });
+document.getElementById('search-close').addEventListener('click', closeSearch);
+document.addEventListener('keydown', (event) => { if (event.key === 'Escape' && !searchPanel.hidden) closeSearch(); });
+searchLogin.addEventListener('click', () => window.mini.openLogin(state.platform));
+searchRetry.addEventListener('click', () => searchRooms(searchResult.keyword));
+searchList.addEventListener('click', (event) => {
+  const button = event.target.closest('button[data-candidate]');
+  if (button) addSearchCandidate(Number(button.dataset.candidate));
+});
 
 document.querySelectorAll('.col-btn').forEach((btn) => {
   btn.addEventListener('click', () => {
@@ -1096,21 +1161,27 @@ document.addEventListener('click', (e) => {
 const btnLogin = document.getElementById('btn-login');
 const loginDot = document.getElementById('login-dot');
 function updateLoginUI(ok) {
+  const name = platformApi.PLATFORMS[state.platform].name;
   if (btnLogin) {
-    btnLogin.textContent = ok ? '✓ 已登录抖音（点此切换账号）' : '扫码登录抖音';
-    btnLogin.classList.toggle('btn-primary', !ok);
+    btnLogin.textContent = ok === true ? `已登录${name}（切换账号）` : `登录${name}`;
+    btnLogin.classList.toggle('btn-primary', ok !== true);
   }
   if (loginDot) {
-    loginDot.classList.toggle('on', !!ok);
-    loginDot.title = ok ? '抖音登录状态：已登录' : '抖音登录状态：未登录';
+    loginDot.classList.toggle('on', ok === true);
+    loginDot.title = ok === null ? `${name}登录状态请在官方窗口确认` : `${name}登录状态：${ok ? '已登录' : '未登录'}`;
   }
 }
 async function refreshLoginStatus() {
-  try { updateLoginUI(await window.mini.getLoginStatus()); } catch {}
+  const platform = state.platform;
+  try {
+    const ok = await window.mini.getLoginStatus(platform);
+    if (state.platform === platform) updateLoginUI(ok);
+  } catch { if (state.platform === platform) updateLoginUI(null); }
 }
-if (btnLogin) btnLogin.addEventListener('click', () => { window.mini.openLogin(); toast('请在弹出的窗口里扫码登录'); });
-if (window.mini.onLoginStatus) window.mini.onLoginStatus(updateLoginUI);
-refreshLoginStatus();
+if (btnLogin) btnLogin.addEventListener('click', () => { window.mini.openLogin(state.platform); toast('请在弹出的官方窗口里登录'); });
+if (window.mini.onLoginStatus) window.mini.onLoginStatus((payload) => {
+  if (payload && payload.platform === state.platform) updateLoginUI(payload.loggedIn);
+});
 // 全局清晰度
 if (globalQualityEl) globalQualityEl.addEventListener('change', () => setGlobalQuality(globalQualityEl.value));
 
@@ -1169,20 +1240,25 @@ wireOverlayToggle(btnDanmu, 'showDanmu', '实时弹幕已开（画面右侧）',
 wireOverlayToggle(btnGifts, 'showGifts', '实时礼物已开（画面左侧）', '实时礼物已关', () => {
   // 抖音只对登录用户的弹幕连接推送礼物消息（弹幕/点赞/进场不受影响）→ 没登录明确告知，不让人以为坏了
   window.mini.getLoginStatus().then((ok) => {
-    if (!ok) toast('抖音只给登录用户推送礼物消息：请点右上 ⚙ →「扫码登录抖音」，登录后礼物才会显示', 6000);
+    if (!ok) toast('抖音礼物消息需要登录，请打开直播间管理登录抖音', 6000);
   }).catch(() => {});
 });
 wireOverlayToggle(btnBattle, 'showBattle', '比赛战况已开（画面上部，等比赛数据推送）', '比赛战况已关');
 // 攒批弹幕：一包多房间，一个 rAF 内全部渲染完，8+ 房间同时刷也只触发一次布局
 window.mini.onDanmuBatch((map) => {
-  if (!map) return;
+  if (!map || state.platform !== 'douyin') return;
   for (const rid in map) handleDanmu({ rid, items: map[rid] });
 });
 
 window.mini.onRecordingStatus((payload) => {
   if (!payload || !payload.roomId) return;
-  if (payload.status === 'recording') state.recordingRooms.add(payload.roomId);
-  else state.recordingRooms.delete(payload.roomId);
+  const platform = platformApi.normalizePlatform(payload.platform);
+  if (!recordingByPlatform.has(platform)) recordingByPlatform.set(platform, new Set());
+  const rooms = recordingByPlatform.get(platform);
+  if (payload.status === 'recording') rooms.add(payload.roomId);
+  else rooms.delete(payload.roomId);
+  if (platform !== state.platform) return;
+  state.recordingRooms = rooms;
   const row = libListEl.querySelector(`.lib-row[data-id="${payload.roomId}"]`);
   if (row) row.classList.toggle('is-recording', payload.status === 'recording');
   if (payload.status === 'recording') {
@@ -1192,6 +1268,16 @@ window.mini.onRecordingStatus((payload) => {
   } else if (payload.status === 'stopped' && payload.reason !== 'app-quit') {
     toast(`${payload.roomName} 自动录制已结束`);
   }
+});
+
+window.mini.onAudience((payload) => {
+  if (state.platform !== 'xiaohongshu') return;
+  const room = state.rooms.find((item) => item.id === payload.id);
+  if (!room) return;
+  applyAudience(room, payload);
+  updateCellMeta(room);
+  const player = players.get(room.id);
+  if (player) player.updateStats();
 });
 
 // 只看在播开关
@@ -1314,11 +1400,12 @@ setInterval(async () => {
   for (const lp of players.values()) {
     if (lp.destroyed || lp.room.status !== 'live' || !lp.room.webRid) continue;
     try {
-      const res = await window.mini.resolve(lp.room.webRid, 'fluent', { allowNavigationFallback: false });
+      const res = await window.mini.resolve(lp.room.webRid, 'fluent', { allowNavigationFallback: false, platform: lp.room.platform });
+      if (lp.destroyed) continue;
       // 只取在线人数+源流标称参数，绝不因此改播放状态（接口这次抽风也不影响画面）
-      if (res && res.userCount) lp.room.count = res.userCount;
+      if (res && res.ok) applyAudience(lp.room, res);
       if (res && res.srcMeta && Object.keys(res.srcMeta).length) lp.room.src = res.srcMeta; // 主播中途改推流设置也能跟上
-      if (res && (res.userCount || res.srcMeta)) lp.updateStats();
+      if (res && res.ok) { updateCellMeta(lp.room); lp.updateStats(); }
     } catch { /* ignore */ }
     await new Promise((r) => setTimeout(r, 400)); // 逐个错峰，别一次性打爆接口
   }
@@ -1327,47 +1414,146 @@ setInterval(async () => {
 // mac 隐藏标题栏时红绿灯悬在窗口左上 → 给 topbar 留出让位间距（Windows 无此问题不留）
 if (/Mac/i.test(navigator.platform)) document.body.classList.add('platform-mac');
 
-// —— 启动 —— //
+function closeSearch() {
+  searchGeneration++;
+  searchPanel.hidden = true;
+  window.mini.cancelSearch();
+}
+
+function renderSearchResults() {
+  searchTitle.textContent = `搜索“${searchResult.keyword}”`;
+  searchLogin.textContent = `登录${platformApi.PLATFORMS[state.platform].name}`;
+  searchLogin.hidden = !['login_required', 'error'].includes(searchResult.status);
+  searchRetry.hidden = searchResult.status === 'loading';
+  searchMessage.textContent = searchResult.status === 'loading' ? '正在搜索直播间…'
+    : searchResult.message || (searchResult.candidates.length ? `找到 ${searchResult.candidates.length} 个直播间，点击添加即可上墙` : '未找到正在直播的房间，请确认名字或稍后重试');
+  searchList.innerHTML = searchResult.candidates.map((item, index) => {
+    const existing = state.library.find((room) => normUrl(room.url) === normUrl(item.roomUrl));
+    const added = existing && isOnWall(existing.id);
+    const avatar = /^https:\/\//i.test(item.avatar || '') ? `<img class="search-avatar" src="${escapeHtml(item.avatar)}" alt="" referrerpolicy="no-referrer">` : `<span class="search-avatar">${icon('detail')}</span>`;
+    return `<div class="search-row">${avatar}<div class="search-copy"><strong>${escapeHtml(item.title)}</strong><p>${escapeHtml(item.subtitle || '直播中')}</p></div><button class="btn btn-primary" data-candidate="${index}" ${added ? 'disabled' : ''}>${added ? '已添加' : '添加'}</button></div>`;
+  }).join('');
+}
+
+function addSearchCandidate(index) {
+  if (searchResult.platform !== state.platform || searchResult.status !== 'success') return;
+  const item = searchResult.candidates[index];
+  if (!item || !addFromInput(item.roomUrl, item.title)) return;
+  renderSearchResults();
+  toast(`${item.title} 已添加到直播墙`);
+}
+
+async function searchRooms(keyword) {
+  const query = String(keyword || '').trim();
+  if (!query) return;
+  const generation = ++searchGeneration;
+  const platform = state.platform;
+  searchResult = { keyword: query, platform, status: 'loading', candidates: [] };
+  closeDrawer();
+  searchPanel.hidden = false;
+  renderSearchResults();
+  try {
+    const result = await window.mini.search(query, platform);
+    if (generation !== searchGeneration || platform !== state.platform) return;
+    if (!result || result.status === 'cancelled') { closeSearch(); return; }
+    searchResult = { ...searchResult, ...result, keyword: query, platform };
+  } catch {
+    if (generation !== searchGeneration || platform !== state.platform) return;
+    searchResult = { ...searchResult, status: 'error', message: '搜索失败，请重试', candidates: [] };
+  }
+  renderSearchResults();
+}
+
+function applyPlatformUI() {
+  const isXhs = state.platform === 'xiaohongshu';
+  const name = platformApi.PLATFORMS[state.platform].name;
+  platformSelect.value = state.platform;
+  document.body.dataset.livePlatform = state.platform;
+  document.title = `${name}直播墙`;
+  inputEl.placeholder = `搜索${name}直播间名字，或粘贴直播链接 / 房间号`;
+  libUrlEl.placeholder = isXhs ? '搜索直播间名字，或粘贴小红书直播分享链接' : '搜索直播间名字，或粘贴主播主页 / 直播链接';
+  for (const button of [btnDanmu, btnGifts, btnBattle]) button.hidden = isXhs;
+  document.getElementById('platform-description').textContent = isXhs
+    ? '输入名字搜索小红书直播间，在结果中点击添加即可上墙。需要登录时按提示扫码，再重新搜索。弹幕、礼物和战况暂未接入。'
+    : '输入名字搜索抖音直播间，点击结果即可上墙。登录后可在详情中使用官方互动功能。';
+  updateLoginUI(null);
+  refreshLoginStatus();
+}
+
+function restoreProfile(platform) {
+  state.platform = platform;
+  const saved = platformStore.profiles[platform];
+  const firstRun = !saved || (!Array.isArray(saved.library) && !(saved.rooms && saved.rooms.length));
+  state.library = saved && Array.isArray(saved.library) ? saved.library.map((item) => ({ ...item })) : [];
+  let wall = saved && Array.isArray(saved.wall) ? [...saved.wall] : [];
+  if (firstRun && platform === 'douyin') {
+    state.library = DEFAULT_LIBRARY.map((item) => ({ ...item }));
+    wall = [...DEFAULT_WALL];
+  } else if (saved && !Array.isArray(saved.library) && Array.isArray(saved.rooms)) {
+    for (const item of saved.rooms) {
+      const parsed = platformApi.parseInput(item.room || item.url, platform);
+      if (!['live', 'profile'].includes(parsed.kind)) continue;
+      const id = uid();
+      state.library.push({ id, name: item.title || '', brand: '', url: parsed.url, kind: parsed.kind });
+      wall.push(id);
+    }
+  }
+  state.cols = saved && saved.cols || 'auto';
+  savedQuality = saved && saved.quality || {};
+  state.globalQuality = saved && saved.globalQuality || 'auto';
+  state.hudAlways = !!(saved && saved.hudAlways);
+  state.liveOnly = !!(saved && saved.liveOnly);
+  for (const key of ['showDanmu', 'showGifts', 'showBattle']) state[key] = platform === 'douyin' && !!(saved && saved[key]);
+  state.autoRecording = normalizeAutoRecording(saved && saved.autoRecording);
+  if (!recordingByPlatform.has(platform)) recordingByPlatform.set(platform, new Set());
+  state.recordingRooms = recordingByPlatform.get(platform);
+  state.rooms = [];
+  state.soloId = null;
+  for (const id of wall) putOnWall(id, { noRender: true });
+  document.querySelectorAll('.col-btn').forEach((button) => button.classList.toggle('active', button.dataset.cols === String(state.cols)));
+  globalQualityEl.value = state.globalQuality;
+  applyHudAlways();
+  applyOverlayToggles();
+  applyAutoRecordingControls();
+  applyPlatformUI();
+  renderGrid();
+  renderLibList();
+}
+
+function switchPlatform(value) {
+  const platform = platformApi.normalizePlatform(value);
+  if (platform === state.platform) return;
+  closeSearch();
+  persist();
+  for (const player of players.values()) player.destroy();
+  players.clear();
+  window.mini.setInfoMode(false, []);
+  window.mini.setPlatform(platform);
+  inputEl.value = '';
+  libNameEl.value = '';
+  libGroupEl.value = '';
+  libUrlEl.value = '';
+  restoreProfile(platform);
+  persist();
+  toast(`已切换到${platformApi.PLATFORMS[platform].name}`);
+}
+
+platformSelect.addEventListener('change', () => switchPlatform(platformSelect.value));
+window.mini.onRoomSelected((payload) => {
+  if (!payload || payload.platform !== state.platform) return;
+  if (addFromInput(payload.url, payload.name)) toast('已加入直播墙');
+});
+
 async function init() {
   let saved;
   try { saved = await window.mini.loadRooms(); } catch { saved = null; }
-  const savedAutoRecording = saved && saved.autoRecording;
-  if (saved && saved.cols) {
-    state.cols = saved.cols;
-    document.querySelectorAll('.col-btn').forEach((b) => b.classList.toggle('active', b.dataset.cols === String(saved.cols)));
+  platformStore = platformApi.restoreStore(saved);
+  window.mini.setPlatform(platformStore.activePlatform);
+  restoreProfile(platformStore.activePlatform);
+  for (const [platform, profile] of Object.entries(platformStore.profiles)) {
+    if (platform !== state.platform && profile) window.mini.setAutoRecordingConfig({ ...profile, platform });
   }
-  state.library = (saved && Array.isArray(saved.library)) ? saved.library : [];
-  let wall = (saved && Array.isArray(saved.wall)) ? saved.wall : [];
-  savedQuality = (saved && saved.quality && typeof saved.quality === 'object') ? saved.quality : {};
-  state.globalQuality = (saved && saved.globalQuality) || 'auto';
-  state.hudAlways = !!(saved && saved.hudAlways);
-  applyHudAlways();
-  state.liveOnly = !!(saved && saved.liveOnly);
-  state.showDanmu = !!(saved && saved.showDanmu);
-  state.showGifts = !!(saved && saved.showGifts);
-  state.showBattle = !!(saved && saved.showBattle);
-  applyOverlayToggles();
-  if (globalQualityEl) globalQualityEl.value = state.globalQuality;
-
-  // 首次打开（没有任何保存）→ 载入默认直播间，开箱即看
-  const firstRun = !saved || (!state.library.length && !(saved.rooms && saved.rooms.length));
-  if (firstRun) {
-    state.library = DEFAULT_LIBRARY.map((x) => ({ ...x }));
-    wall = [...DEFAULT_WALL];
-  } else if (!state.library.length && saved && Array.isArray(saved.rooms)) {
-    // 兼容旧格式（saved.rooms 是直接的 url 列表）
-    for (const it of saved.rooms) addToLibrary(it.title || '', it.room || it.url, '');
-  }
-
-  state.autoRecording = normalizeAutoRecording(savedAutoRecording);
-  applyAutoRecordingControls();
-  syncAutoRecordingConfig();
-
-  for (const libId of wall) putOnWall(libId, { noRender: true });
-  renderGrid();
-  renderLibList();
-  // 上墙完成后再持久化，确保默认上墙状态被正确保存
-  if (firstRun) persist();
+  persist();
 }
 
 init();

@@ -9,9 +9,25 @@
 
 <body>
   <header class="topbar">
+    <select id="platform-select" class="mini-select platform-select" aria-label="直播平台" title="切换直播平台，各平台分别保存直播间">
+      <option value="douyin">抖音</option>
+      <option value="xiaohongshu">小红书</option>
+    </select>
     <div class="add-box">
-      <input id="room-input" type="text" placeholder="粘贴直播间链接或房间号，回车添加（如 https://live.douyin.com/123456789）" />
-      <button id="btn-add" class="btn btn-primary">添加</button>
+      <input id="room-input" type="text" aria-label="搜索直播间或添加链接" placeholder="输入直播间名字搜索，或粘贴链接 / 房间号" />
+      <button id="btn-add" class="btn btn-primary">搜索 / 添加</button>
+      <section id="room-search" class="room-search" aria-label="直播间搜索结果" hidden>
+        <div class="search-heading">
+          <strong id="search-title">搜索直播间</strong>
+          <button id="search-close" class="btn" aria-label="关闭搜索结果">关闭</button>
+        </div>
+        <p id="search-message" class="search-message" role="status" aria-live="polite"></p>
+        <div id="search-list" class="search-list"></div>
+        <div class="search-actions">
+          <button id="search-login" class="btn" hidden>登录</button>
+          <button id="search-retry" class="btn" hidden>重新搜索</button>
+        </div>
+      </section>
     </div>
 
     <div class="cols-ctrl">
@@ -67,7 +83,7 @@
   <div id="empty-hint" class="empty-hint">
     <div class="empty-card">
       <div class="empty-title">还没有直播间上墙</div>
-      <div class="empty-desc">点右上角 ⚙ 打开「直播间管理」，或在顶部粘贴链接添加直播间。<br>打开就出画面，不撞验证码、不用单独登录。</div>
+      <div id="empty-description" class="empty-desc">在顶部输入直播间名字搜索，点击正在直播的主播即可上墙。<br>也可以粘贴直播链接或房间号。</div>
       <button id="btn-open-settings-empty" class="btn btn-primary" style="margin-top:16px;">打开直播间管理</button>
     </div>
   </div>
@@ -88,12 +104,12 @@
       <button id="btn-wall-none" class="btn">全部下墙</button>
       <button id="btn-check-update" class="btn">检查更新</button>
     </div>
-    <div class="drawer-stat" style="padding-top:0;">登录后：双击打开的真实直播间可看原画、可发言。不登录也能看（原画限 26 秒）。</div>
+    <div id="platform-description" class="drawer-stat" style="padding-top:0;"></div>
 
     <section class="recording-settings" aria-labelledby="recording-settings-title">
       <div class="recording-settings-copy">
         <div id="recording-settings-title" class="recording-settings-title">自动录制</div>
-        <div class="recording-settings-desc">检测到所选直播间开播后，保存原始画面和声音到系统视频目录。</div>
+        <div class="recording-settings-desc">检测到所选直播间开播后，保存到系统视频目录。切换平台后录制继续。</div>
       </div>
       <label class="recording-switch">
         <input id="auto-recording-enabled" type="checkbox" />
@@ -128,6 +144,7 @@
   <script src="../lib/vendor/mpegts.js"></script>
   <script src="../lib/live-presence.js"></script>
   <script src="../lib/room-refresh.js"></script>
+  <script src="../lib/live-platform.js"></script>
   <script src="./grid.js"></script>
 </body>
 

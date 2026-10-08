@@ -1,13 +1,68 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import streamModule from '../lib/douyin-stream.js';
+import douyinStreamModule from '../lib/douyin-stream.js';
 
-const {
-  parseEnterPayload,
-  buildFlvCandidates,
-  scrapePageStreams,
-  resolveStream,
-} = streamModule;
+const { resolveStream, parseEnterPayload, buildFlvCandidates, scrapePageStreams } = douyinStreamModule;
+
+test('快速检查失败时不进入串行导航兜底', async () => {
+  let navigationCalls = 0;
+  const result = await resolveStream({
+    apiRunJs: async () => ({ __ok: false, __reason: 'network-failed' }),
+    withNav: async () => {
+      navigationCalls += 1;
+      return { __ok: false };
+    },
+  }, '6300864795', {
+    quality: 'fluent',
+    allowNavigationFallback: false,
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.status, 'unknown');
+  assert.equal(navigationCalls, 0);
+});
+
+test('完整解析仍会在 API 未知时使用导航兜底', async () => {
+  let navigationCalls = 0;
+  const result = await resolveStream({
+    apiRunJs: async () => ({ __ok: false, __reason: 'network-failed' }),
+    withNav: async (task) => {
+      navigationCalls += 1;
+      return task(
+        async () => {},
+        async () => ({
+          __ok: true,
+          __scrape: {
+            flv: { SD2: 'https://example.com/live.flv' },
+            hls: {},
+            status: 'live',
+          },
+        }),
+      );
+    },
+  }, '6300864795', { quality: 'fluent' });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.flvUrl, 'https://example.com/live.flv');
+  assert.equal(navigationCalls, 1);
+});
+
+test('快速检查主播主页时不进入导航队列', async () => {
+  let navigationCalls = 0;
+  const result = await resolveStream({
+    apiRunJs: async () => ({ __ok: false }),
+    withNav: async () => {
+      navigationCalls += 1;
+      return '';
+    },
+  }, 'https://www.douyin.com/user/example', {
+    allowNavigationFallback: false,
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.deferred, true);
+  assert.equal(navigationCalls, 0);
+});
 
 function makePayload() {
   return {

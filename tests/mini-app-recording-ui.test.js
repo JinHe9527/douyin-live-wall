@@ -9,9 +9,15 @@ const main = await readFile(new URL('../mini-app/main.js', import.meta.url), 'ut
 
 test('宫格页加载直播可用性模块并提供全部刷新', () => {
   assert.match(html, /\.\.\/lib\/live-presence\.js/);
+  assert.match(html, /\.\.\/lib\/room-refresh\.js/);
   assert.match(html, /id="btn-refresh-all"/);
   assert.match(grid, /LivePresence\.createPresence/);
-  assert.match(grid, /refreshAllRooms/);
+  assert.match(grid, /RoomRefresh\.runRoomRefresh/);
+  assert.match(grid, /player\.restart\(\{ allowNavigationFallback: false \}\)/);
+  assert.match(grid, /this\.player && this\.room\.status === 'live'[\s\S]*else this\.recover\('manual'\)/);
+  assert.match(grid, /res && res\.deferred/);
+  assert.match(grid, /const allowNavigationFallback = this\.room\.kind === 'profile'/);
+  assert.match(grid, /allowNavigationFallback: forceNavigationFallback \|\| this\.room\.kind === 'profile' \|\| this\.attempts % 4 === 0/);
   assert.match(grid, /ROOM_POLL_INTERVAL_MS\s*=\s*15_000/);
 });
 
