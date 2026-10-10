@@ -36,6 +36,12 @@ test('人数订阅复用同一房间，切换或下墙释放页面，过期消�
     assert.equal(counts[0].userCount, '321');
     monitor.setRooms([room]);
     assert.equal(windows.length, 1);
+    monitor.setRooms([room, { id: 'duplicate', url: room.url + '?xsec_token=another' }]);
+    assert.equal(windows.length, 1, '同场直播多个格子只创建一个后台页面');
+    windows[0].webContents.debugger.emit('message', {}, 'Network.webSocketFrameReceived', { response: { opcode: 1, payloadData: '{"room_data":{"member_count":456,"viewer_info_display_type":0}}' } });
+    assert.deepEqual(counts.slice(-2).map(value => value.id), ['room', 'duplicate']);
+    monitor.setRooms([{ id: 'duplicate', url: room.url }]);
+    assert.equal(windows[0].destroyed, false, '移除一个格子时保留仍被使用的订阅');
     monitor.setRooms([]);
     assert.equal(windows[0].destroyed, true);
     const before = counts.length;

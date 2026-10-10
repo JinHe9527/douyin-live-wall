@@ -7,6 +7,8 @@ const fs = require('fs');
 const { app, BrowserWindow, WebContentsView, session, ipcMain, dialog, shell, net, Menu } = require('electron');
 const { resolveStream } = require('../lib/douyin-stream');
 const xiaohongshuStream = require('../lib/xiaohongshu-stream');
+const { createXiaohongshuTracker } = require('../lib/xiaohongshu-tracker');
+const { createDesktopStreamReader } = require('../lib/xiaohongshu-desktop');
 const { PLATFORMS, normalizePlatform, roomUrl } = require('../lib/live-platform');
 const { createPlatformWindows } = require('../lib/platform-windows');
 const { createRoomSearch } = require('../lib/room-search');
@@ -53,6 +55,20 @@ const platformWindows = createPlatformWindows({
   },
 });
 const roomSearch = createRoomSearch({ BrowserWindow, session, userAgent: DESKTOP_UA, prepareWindow: blockMediaIn });
+const trackingSearch = createRoomSearch({ BrowserWindow, session, userAgent: DESKTOP_UA, prepareWindow: blockMediaIn });
+const desktopStreamReader = createDesktopStreamReader({ BrowserWindow, session, userAgent: DESKTOP_UA, prepareWindow: blockMediaIn });
+const xiaohongshuTracker = createXiaohongshuTracker({
+  resolve: async (url, quality) => {
+    const result = await xiaohongshuStream.resolveStream(
+      (target, init) => session.fromPartition(PLATFORMS.xiaohongshu.partition).fetch(target, init), url, { quality });
+    if (!result.ok || quality === 'origin') return result;
+    const data = await desktopStreamReader.read(result.roomUrl || url);
+    if (!data) return result;
+    const desktop = xiaohongshuStream.parseLiveState(data, result.webRid, quality);
+    return desktop.ok ? { ...desktop, roomUrl: result.roomUrl || url } : result;
+  },
+  search: (name) => trackingSearch.search(name, 'xiaohongshu'),
+});
 const audienceMonitor = createAudienceMonitor({ BrowserWindow, session, userAgent: DESKTOP_UA, prepareWindow: blockMediaIn,
   onCount: (payload) => {
     if (activePlatform === 'xiaohongshu' && mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('mini-audience', payload);
@@ -250,8 +266,7 @@ function makeCtx() {
 
 async function resolvePlatformStream(platform, input, quality, options = {}) {
   if (platform === 'xiaohongshu') {
-    const ses = session.fromPartition(PLATFORMS.xiaohongshu.partition);
-    return xiaohongshuStream.resolveStream((url, init) => ses.fetch(url, init), input, { quality });
+    return xiaohongshuTracker.resolveRoom(input, quality, options);
   }
   await ensureResolver(session.fromPartition(PLATFORMS.douyin.partition));
   return resolveStream(makeCtx(), input, {
@@ -264,7 +279,7 @@ async function resolvePlatformStream(platform, input, quality, options = {}) {
 function ensureAutoRecorder(platform) {
   if (autoRecorders.has(platform)) return autoRecorders.get(platform);
   const autoRecorder = createAutoRecorder({
-    resolveRoom: (url, quality) => resolvePlatformStream(platform, url, quality),
+    resolveRoom: (url, quality, room) => resolvePlatformStream(platform, url, quality, room),
     openStream: createElectronStreamOpener({
       net,
       session: session.fromPartition(PLATFORMS[platform].partition),
@@ -297,7 +312,7 @@ async function createWindow() {
     width: 1440,
     height: 900,
     backgroundColor: '#0b0d12',
-    title: '多平台直播墙',
+    title: `多平台直播墙${app.isPackaged ? '' : ' · 开发版'}`,
     // 隐藏系统标题栏、保留红绿灯：工具栏顶到最上一行，省出一整行给画面
     titleBarStyle: 'hiddenInset',
     autoHideMenuBar: true, // Windows/Linux：隐藏菜单栏(File/Edit…)
@@ -310,6 +325,8 @@ async function createWindow() {
     },
   });
   mainWin.setMenuBarVisibility(false);
+  // renderer 更新 document.title 时仍保留原生窗口的开发版标记。
+  mainWin.on('page-title-updated', (event) => event.preventDefault());
   mainWin.loadFile(path.join(__dirname, 'grid.html'));
   // 关主窗口 = 退出整个 app（连同隐藏的解析页一起关，进程干净退出）
   // 否则隐藏页残留会挡住 window-all-closed，导致二次打开被单实例锁挡在外面
@@ -342,7 +359,7 @@ ipcMain.on('mini-platform', (_evt, value) => {
   activePlatform = normalizePlatform(value);
   platformWindows.closeSearch();
   platformWindows.closeDetail();
-  if (mainWin && !mainWin.isDestroyed()) mainWin.setTitle(`${PLATFORMS[activePlatform].name}直播墙`);
+  if (mainWin && !mainWin.isDestroyed()) mainWin.setTitle(`${PLATFORMS[activePlatform].name}直播墙${app.isPackaged ? '' : ' · 开发版'}`);
 });
 ipcMain.handle('mini-search', (_evt, { keyword, platform }) => {
   if (normalizePlatform(platform) !== activePlatform) return { status: 'cancelled', candidates: [] };
@@ -601,7 +618,10 @@ if (!app.requestSingleInstanceLock()) {
 
 app.on('window-all-closed', () => app.quit());
 app.on('before-quit', () => {
+  desktopStreamReader.stop();
+  xiaohongshuTracker.stop();
   roomSearch.cancel();
+  trackingSearch.cancel();
   audienceMonitor.stop();
   for (const autoRecorder of autoRecorders.values()) autoRecorder.stop();
 });

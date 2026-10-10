@@ -1,13 +1,13 @@
 {
   "name": "douyin-live-wall",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "private": true,
   "main": "mini-app/main.js",
   "scripts": {
-    "dev": "electron mini-app/main.js",
-    "start": "electron mini-app/main.js",
+    "dev": "electron .",
+    "start": "electron .",
     "test": "node --test tests/*.test.js",
-    "test:mini": "node --test tests/live-platform.test.js tests/platform-grid.test.js tests/platform-windows.test.js tests/room-search.test.js tests/xiaohongshu-audience.test.js tests/xiaohongshu-stream.test.js tests/live-presence.test.js tests/recording-settings.test.js tests/auto-recorder.test.js tests/mini-app-recording-ui.test.js tests/douyin-stream.test.js tests/room-refresh.test.js",
+    "test:mini": "node --test tests/live-platform.test.js tests/platform-grid.test.js tests/platform-windows.test.js tests/room-search.test.js tests/xiaohongshu-audience.test.js tests/xiaohongshu-stream.test.js tests/xiaohongshu-tracker.test.js tests/xiaohongshu-desktop.test.js tests/live-presence.test.js tests/recording-settings.test.js tests/auto-recorder.test.js tests/mini-app-recording-ui.test.js tests/douyin-stream.test.js tests/room-refresh.test.js",
     "dist:mac": "electron-builder --mac --arm64 --x64",
     "dist:win": "electron-builder --win --x64"
   },

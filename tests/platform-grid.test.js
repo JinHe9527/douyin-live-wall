@@ -40,7 +40,7 @@ function harness(saved, search = async () => ({ status: 'success', candidates: [
   });
   vm.runInContext(fs.readFileSync(require.resolve('../mini-app/grid.js'), 'utf8')
     + '\nwindow.testApi = { state, players, LivePlayer, switchPlatform, addFromInput, persist, searchRooms, addSearchCandidate, closeSearch, applyAudience, audienceText };', context);
-  return { api: context.window.testApi, mini, element, calls, elements, settle: () => new Promise(setImmediate) };
+  return { api: context.window.testApi, window: context.window, mini, element, calls, elements, settle: () => new Promise(setImmediate) };
 }
 
 test('多平台解析保留直播地址和人数，换线沿用原平台并尝试备用流', async () => {
@@ -67,6 +67,77 @@ test('多平台解析保留直播地址和人数，换线沿用原平台并尝�
   assert.equal(player.tryNextCandidate(), true);
   assert.deepEqual(played, ['https://live.xhscdn.com/main.flv', 'https://live.xhscdn.com/backup.flv']);
   assert.equal(player.tryNextCandidate(), false);
+});
+
+test('重复的小红书场次共享解码画面，源播放器关闭后副本能够恢复', async () => {
+  const h = harness({ library: [], wall: [] });
+  await h.settle();
+  let created = 0, stopped = 0;
+  const stream = { getVideoTracks: () => [{}], getTracks: () => [{ stop: () => stopped++ }] };
+  h.window.mpegts = { isSupported: () => true, createPlayer: () => { created++; throw new Error('不应再建播放器'); } };
+  const sourceVideo = { ...h.element(), readyState: 4, captureStream: () => stream };
+  const source = new h.api.LivePlayer(sourceVideo, h.element(), { id: 'source', platform: 'xiaohongshu', webRid: '123', stats: { w: 1080 } });
+  source.player = { pause() {}, unload() {}, detachMediaElement() {}, destroy() {} };
+  const mirrorVideo = { ...h.element(), play: async () => {} };
+  const mirror = new h.api.LivePlayer(mirrorVideo, h.element(), { id: 'mirror', platform: 'xiaohongshu', webRid: '123', presence: presence.createPresence() });
+  h.api.players.set('source', source);
+  h.api.players.set('mirror', mirror);
+  mirror.create('https://live.xhscdn.com/live.flv');
+  assert.equal(created, 0);
+  assert.equal(mirror.sharedSource, source);
+  assert.equal(mirrorVideo.srcObject, stream);
+  assert.equal(source.mirrors.size, 1);
+  source.destroy();
+  assert.equal(mirror.recovering, true);
+  assert.equal(mirror.sharedSource, null);
+  mirror.destroy();
+  assert.equal(stopped, 1);
+  assert.equal(mirrorVideo.srcObject, null);
+});
+
+test('已确认未开播的小红书房间直接显示未开播', async () => {
+  const h = harness({ library: [], wall: [] });
+  await h.settle();
+  const room = { id: 'offline', platform: 'xiaohongshu', url: 'https://www.xiaohongshu.com/livestream/123456', presence: presence.createPresence() };
+  h.mini.resolve = async () => ({ ok: false, status: 'offline', message: '未开播' });
+  const player = new h.api.LivePlayer(h.element(), h.element(), room);
+  let message;
+  player.setState = (status, text) => { room.status = status; message = text; };
+  assert.equal(await player.reResolve(), true);
+  assert.equal(room.status, 'offline');
+  assert.equal(room.presence.availability, 'offline');
+  assert.equal(message, '未开播');
+});
+
+test('小红书新场次替换原格子并持久化，保留分组和录制选择', async () => {
+  const oldUrl = 'https://www.xiaohongshu.com/livestream/123456';
+  const newUrl = 'https://www.xiaohongshu.com/livestream/987654?xsec_token=test';
+  const h = harness({ activePlatform: 'xiaohongshu', profiles: { xiaohongshu: {
+    library: [{ id: 'xhs', name: '自定义备注', brand: '宇宙', url: oldUrl, kind: 'live', anchorName: '宇宙-K' }], wall: [],
+    autoRecording: { enabled: false, durationHours: 1, roomIds: ['xhs'] },
+  } } });
+  await h.settle();
+  h.api.addFromInput(oldUrl);
+  const room = h.api.state.rooms[0];
+  let options;
+  h.mini.resolve = async (_url, _quality, opts) => {
+    options = opts;
+    return { ok: true, webRid: '987654', roomUrl: newUrl, anchorName: '宇宙-K', anchorId: 'host-k',
+      refreshedRoom: true, flvUrl: 'https://live.xhscdn.com/main.flv' };
+  };
+  const player = new h.api.LivePlayer(h.element(), h.element(), room);
+  player.create = () => {};
+  assert.equal(await player.reResolve(), true);
+  await h.settle();
+  assert.equal(options.anchorName, '宇宙-K');
+  assert.equal(room.url, newUrl);
+  assert.equal(h.api.state.rooms.length, 1);
+  const saved = h.calls.saves.at(-1).profiles.xiaohongshu;
+  assert.equal(saved.library[0].url, newUrl);
+  assert.equal(saved.library[0].anchorId, 'host-k');
+  assert.equal(saved.library[0].name, '自定义备注');
+  assert.equal(saved.library[0].brand, '宇宙');
+  assert.equal(saved.autoRecording.roomIds[0], 'xhs');
 });
 
 test('切换平台销毁旧播放器、保存库与设置，切回恢复各自内容', async () => {

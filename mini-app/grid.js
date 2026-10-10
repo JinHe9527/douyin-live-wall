@@ -121,6 +121,9 @@ class LivePlayer {
     this.statusEl = statusEl;
     this.room = room;
     this.player = null;
+    this.sharedSource = null;
+    this.sharedStream = null;
+    this.mirrors = new Set();
     this.recovering = false;
     this.attempts = 0;
     this.recoverTimer = null;
@@ -241,15 +244,36 @@ class LivePlayer {
     this.destroyPlayer();
     this.currentFlvUrl = flvUrl;
     this.room.flvUrl = flvUrl;
+    if (this.room.platform === 'xiaohongshu' && this.room.webRid) {
+      const source = [...players.values()].find((other) => other !== this && !other.destroyed
+        && !other.sharedSource && other.player && other.videoEl.readyState >= 2
+        && desiredQuality(other.room) === desiredQuality(this.room)
+        && other.room.platform === this.room.platform && other.room.webRid === this.room.webRid);
+      if (source && typeof source.videoEl.captureStream === 'function') {
+        try {
+          const stream = source.videoEl.captureStream();
+          if (stream.getVideoTracks().length) {
+            this.sharedSource = source;
+            this.sharedStream = stream;
+            source.mirrors.add(this);
+            this.room.stats = { ...source.room.stats };
+            this.videoEl.srcObject = stream;
+            this.videoEl.play().catch(() => {});
+            return;
+          }
+          stream.getTracks().forEach((track) => track.stop());
+        } catch { /* 捕获不支持时正常独立播放。 */ }
+      }
+    }
     const player = window.mpegts.createPlayer(
       { type: 'flv', isLive: true, url: flvUrl },
       {
         enableWorker: true,
-        enableStashBuffer: false,
-        stashInitialSize: 128,
+        enableStashBuffer: this.room.platform === 'xiaohongshu',
+        stashInitialSize: this.room.platform === 'xiaohongshu' ? 512 : 128,
         liveBufferLatencyChasing: true,
-        liveBufferLatencyMaxLatency: 5.0,  // 3→5s：减少追帧跳变，弱机上更平滑(监控墙可容忍几秒延迟)
-        liveBufferLatencyMinRemain: 1.0,
+        liveBufferLatencyMaxLatency: this.room.platform === 'xiaohongshu' ? 12.0 : 5.0,
+        liveBufferLatencyMinRemain: this.room.platform === 'xiaohongshu' ? 4.0 : 1.0,
         lazyLoad: false,
         autoCleanupSourceBuffer: true,
       }
@@ -271,6 +295,10 @@ class LivePlayer {
       const rate = (Number(mi.videoDataRate) || 0) + (Number(mi.audioDataRate) || 0);
       if (rate > 0) this.room.stats.metaKbps = Math.round(rate);
       this.updateStats();
+      for (const mirror of this.mirrors) {
+        mirror.room.stats = { ...this.room.stats };
+        mirror.updateStats();
+      }
     });
     // 本地拉流速度(↓)：s.speed = 上一秒下载 KB/s(突发)，积分成累计字节后在 5s 滚动窗口取均值。
     // 这是"送达本机"的速率，受本地带宽/多路抢带宽影响 —— 只作健康信号展示，不当直播间码率。
@@ -350,6 +378,8 @@ class LivePlayer {
         allowNavigationFallback,
         forceNavigationFallback,
         platform: this.room.platform,
+        anchorName: this.room.anchorName || this.room.name,
+        anchorId: this.room.anchorId,
       });
       if (this.destroyed || generation !== this.resolveGeneration) return false;
       if (res && res.deferred) return false;
@@ -367,6 +397,16 @@ class LivePlayer {
         if (res.title) this.room.title = res.title;
         if (res.anchorName) this.room.anchor = res.anchorName;
         const libraryRoom = findLib(this.room.id);
+        if (this.room.platform === 'xiaohongshu') {
+          this.room.anchorName = res.anchorName || this.room.anchorName;
+          this.room.anchorId = res.anchorId || this.room.anchorId;
+          if (res.refreshedRoom) this.room.url = res.roomUrl;
+          if (libraryRoom && (libraryRoom.url !== this.room.url
+              || libraryRoom.anchorName !== this.room.anchorName || libraryRoom.anchorId !== this.room.anchorId)) {
+            Object.assign(libraryRoom, { url: this.room.url, anchorName: this.room.anchorName, anchorId: this.room.anchorId });
+            persist();
+          }
+        }
         if (libraryRoom && !libraryRoom.name && res.anchorName) {
           libraryRoom.name = res.anchorName;
           this.room.name = res.anchorName;
@@ -382,7 +422,9 @@ class LivePlayer {
         return true;
       }
       if (res && (res.status === 'offline' || res.status === 'ended')) {
+        this.statusEl.title = res.reason || '';
         this.updatePresence('offline');
+        if (this.room.platform === 'xiaohongshu') this.updatePresence('offline');
         if (this.room.presence.availability === 'offline') {
           this.destroyPlayer();
           this.setState(res.status, '未开播');
@@ -466,6 +508,18 @@ class LivePlayer {
   }
 
   destroyPlayer() {
+    if (this.sharedSource) this.sharedSource.mirrors.delete(this);
+    this.sharedSource = null;
+    if (this.sharedStream) {
+      this.sharedStream.getTracks().forEach((track) => track.stop());
+      this.sharedStream = null;
+      this.videoEl.srcObject = null;
+    }
+    for (const mirror of this.mirrors) {
+      mirror.sharedSource = null;
+      if (!mirror.destroyed) mirror.recover('shared-source-restart');
+    }
+    this.mirrors.clear();
     if (this.player) {
       try { this.player.pause(); } catch {}
       try { this.player.unload(); } catch {}
@@ -704,6 +758,7 @@ function addCellForRoom(room, delayMs = 0) {
 function makeRoom(lib) {
   return {
     id: lib.id, name: lib.name, brand: lib.brand, url: lib.url, kind: lib.kind, platform: state.platform,
+    anchorName: lib.anchorName, anchorId: lib.anchorId,
     webRid: '', title: '', anchor: '', count: '', flvUrl: '', status: 'loading',
     presence: window.LivePresence.createPresence(),
     quality: savedQuality[lib.id] || '',
@@ -1439,6 +1494,13 @@ function addSearchCandidate(index) {
   if (searchResult.platform !== state.platform || searchResult.status !== 'success') return;
   const item = searchResult.candidates[index];
   if (!item || !addFromInput(item.roomUrl, item.title)) return;
+  if (state.platform === 'xiaohongshu') {
+    const libraryRoom = state.library.find((room) => normUrl(room.url) === normUrl(item.roomUrl));
+    const room = libraryRoom && state.rooms.find((room) => room.id === libraryRoom.id);
+    if (libraryRoom) Object.assign(libraryRoom, { anchorName: item.title, anchorId: item.anchorId });
+    if (room) Object.assign(room, { anchorName: item.title, anchorId: item.anchorId });
+    persist();
+  }
   renderSearchResults();
   toast(`${item.title} 已添加到直播墙`);
 }
