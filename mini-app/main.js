@@ -43,7 +43,7 @@ let resolverReady = null; // Promise：并发调用共享同一次建窗，避�
 const autoRecorders = new Map();
 let activePlatform = 'douyin';
 const platformWindows = createPlatformWindows({
-  BrowserWindow, session, userAgent: DESKTOP_UA, mobileUserAgent: MOBILE_UA,
+  BrowserWindow, session, userAgent: DESKTOP_UA, mobileUserAgent: MOBILE_UA, prepareWindow: blockMediaIn,
   onRoomSelected: (payload) => {
     if (payload.platform !== activePlatform || !mainWin || mainWin.isDestroyed()) return;
     mainWin.webContents.send('mini-room-selected', payload);
@@ -54,8 +54,8 @@ const platformWindows = createPlatformWindows({
     if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('login-status', payload);
   },
 });
-const roomSearch = createRoomSearch({ BrowserWindow, session, userAgent: DESKTOP_UA, prepareWindow: blockMediaIn });
-const trackingSearch = createRoomSearch({ BrowserWindow, session, userAgent: DESKTOP_UA, prepareWindow: blockMediaIn });
+const roomSearch = createRoomSearch({ BrowserWindow, session, userAgent: DESKTOP_UA, prepareWindow: blockMediaIn, onAuthStatus: platformWindows.reportSearchAuth });
+const trackingSearch = createRoomSearch({ BrowserWindow, session, userAgent: DESKTOP_UA, prepareWindow: blockMediaIn, onAuthStatus: platformWindows.reportSearchAuth });
 const desktopStreamReader = createDesktopStreamReader({ BrowserWindow, session, userAgent: DESKTOP_UA, prepareWindow: blockMediaIn });
 const xiaohongshuTracker = createXiaohongshuTracker({
   resolve: async (url, quality) => {
@@ -618,6 +618,7 @@ if (!app.requestSingleInstanceLock()) {
 
 app.on('window-all-closed', () => app.quit());
 app.on('before-quit', () => {
+  platformWindows.stop();
   desktopStreamReader.stop();
   xiaohongshuTracker.stop();
   roomSearch.cancel();

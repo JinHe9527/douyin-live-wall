@@ -30,14 +30,6 @@
       </section>
     </div>
 
-    <div class="cols-ctrl">
-      <span class="cols-label">列数</span>
-      <button class="col-btn active" data-cols="auto">自动</button>
-      <button class="col-btn" data-cols="2">2</button>
-      <button class="col-btn" data-cols="3">3</button>
-      <button class="col-btn" data-cols="4">4</button>
-    </div>
-
     <div class="quality-ctrl">
       <span class="cols-label">清晰度</span>
       <select id="global-quality" class="mini-select" title="设置所有直播间清晰度">
@@ -53,7 +45,7 @@
 
     <button id="btn-live-only" class="btn" title="只显示当前正在直播的直播间，已下播/未开播的自动隐藏，在播的铺满整墙">只看在播</button>
 
-    <button id="btn-hud" class="btn" title="常驻显示每个直播间的名字/分辨率/帧率/码率（否则悬停才显示）">常显信息</button>
+    <button id="btn-hud" class="btn" title="常驻显示名字、当前播放分辨率及标称帧率/码率（否则悬停才显示）">常显信息</button>
 
     <button id="btn-danmu" class="btn" title="实时弹幕显示在每格画面右侧（真实评论/进场，来自弹幕直连）">弹幕</button>
 
@@ -61,7 +53,7 @@
 
     <button id="btn-battle" class="btn" title="比赛战况显示在每格画面上部：任务/展馆进度血条 + 团播成员实时分数与状态（表演中等），数据来自弹幕直连">战况</button>
 
-    <span id="login-dot" class="login-dot" title="抖音登录状态：未登录"></span>
+    <button id="login-dot" class="btn login-status" title="打开官方登录窗口"><span id="login-status-text" role="status" aria-live="polite">检测登录中…</span></button>
 
     <button id="btn-settings" class="btn btn-icon" title="直播间管理 / 设置">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -105,6 +97,7 @@
       <button id="btn-check-update" class="btn">检查更新</button>
     </div>
     <div id="platform-description" class="drawer-stat" style="padding-top:0;"></div>
+    <div id="login-status-detail" class="drawer-stat" role="status" aria-live="polite">正在检测登录状态…</div>
 
     <section class="recording-settings" aria-labelledby="recording-settings-title">
       <div class="recording-settings-copy">

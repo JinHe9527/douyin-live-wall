@@ -96,3 +96,45 @@ test('并发房间串行搜索，同一主播共享查询并在冷却后重试',
   await tracker.resolveRoom(old, 'hd', { anchorName: '甲' });
   assert.equal(searches, 3);
 });
+
+test('账号受限时多个主播共用冷却，期限后恢复检查', async () => {
+  let time = 0, searches = 0;
+  const tracker = createXiaohongshuTracker({ now: () => time, cooldownMs: 100,
+    resolve: async () => ({ ok: false, status: 'unknown' }),
+    search: async () => { searches++; return { status: 'login_required', message: '账号异常（300011）' }; },
+  });
+  const results = await Promise.all(['甲', '乙', '丙'].map(anchorName => tracker.resolveRoom(old, 'hd', { anchorName })));
+  assert.equal(searches, 1);
+  assert.ok(results.every(result => result.message === '账号异常（300011）'));
+  time = 101;
+  await tracker.resolveRoom(old, 'hd', { anchorName: '甲' });
+  assert.equal(searches, 2);
+});
+
+test('旧链接状态未知时可以通过同一主播的官方未开播状态确认，开播后恢复新场次', async () => {
+  let time = 0;
+  const tracker = createXiaohongshuTracker({ now: () => time, cooldownMs: 100,
+    resolve: async url => url === old ? { ok: false, status: 'unknown' } : live,
+    search: async () => time === 0
+      ? { status: 'success', candidates: [], offlineAnchors: [{ title: candidate.title, anchorId: candidate.anchorId }] }
+      : { status: 'success', candidates: [candidate] },
+  });
+  const identity = { anchorName: candidate.title, anchorId: candidate.anchorId };
+  const first = await tracker.resolveRoom(old, 'sd', identity);
+  assert.equal(first.status, 'offline');
+  assert.equal(first.message, '未开播');
+  time = 101;
+  const next = await tracker.resolveRoom(old, 'sd', identity);
+  assert.equal(next.ok, true);
+  assert.equal(next.roomUrl, fresh);
+});
+
+test('其他账号或不完整搜索的未开播结果不能判定当前主播离线', async () => {
+  for (const result of [
+    { status: 'success', offlineAnchors: [{ title: candidate.title, anchorId: 'another-host' }] },
+    { status: 'error', offlineAnchors: [{ title: candidate.title, anchorId: candidate.anchorId }] },
+  ]) {
+    const tracker = createXiaohongshuTracker({ resolve: async () => ({ ok: false, status: 'unknown' }), search: async () => result });
+    assert.equal((await tracker.resolveRoom(old, 'sd', { anchorName: candidate.title, anchorId: candidate.anchorId })).status, 'unknown');
+  }
+});

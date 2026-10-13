@@ -139,6 +139,11 @@ class LivePlayer {
     this.STALL_MS = 12000;     // 卡顿判定放宽到 12s（原画高码率短卡顿是常态）
 
     videoEl.muted = true;
+    // 视频尺寸变化由浏览器通知；直接读取当前解码尺寸，不额外拉流或逐帧轮询。
+    this.onVideoSizeChange = () => this.updateStats();
+    videoEl.addEventListener('loadedmetadata', this.onVideoSizeChange);
+    videoEl.addEventListener('resize', this.onVideoSizeChange);
+    videoEl.addEventListener('emptied', this.onVideoSizeChange);
     videoEl.addEventListener('playing', () => {
       this.updatePresence('live');
       this.setState('live', '');
@@ -197,8 +202,8 @@ class LivePlayer {
   }
 
   // 悬停浮层：在线人数 · 分辨率 · 帧率 · 码率
-  // 分辨率/帧率/码率一律优先用「源流标称值」(room.src，来自房间接口 sdk_params，主播推什么就是什么)，
-  // 不受本地拉流档位/带宽/解码性能影响；标称缺失时才退回所拉流自带的元数据(st.*，仍是流声明值，非本地实测)。
+  // 分辨率取当前视频的实际尺寸，随档位/流内尺寸变化更新；源流标称尺寸仅在提示中显示。
+  // 帧率/码率仍为源流或所拉流声明值，并非本机实际播放帧率。
   // ↓ 后面的数字才是本地实际拉流速度 —— 远低于标称码率 = 本地网络/机器扛不住的健康信号。
   updateStats() {
     if (this.destroyed) return;
@@ -206,14 +211,24 @@ class LivePlayer {
     if (!cell) return;
     const el = cell.querySelector('.cell-stats');
     if (!el) return;
+    if (this.room.status !== 'live') {
+      el.textContent = '';
+      el.title = '';
+      return;
+    }
     const st = this.room.stats || {};
     const src = this.room.src || {};
     const fmtRate = (kbps) => (kbps >= 1000 ? `${(kbps / 1000).toFixed(1)}Mbps` : `${kbps}kbps`);
     const parts = [];
     const audience = audienceText(this.room);
     if (audience) parts.push(audience);
-    const w = src.w || st.w, h = src.h || st.h;
-    if (w && h) parts.push(`${w}×${h}`);
+    const w = this.videoEl.videoWidth, h = this.videoEl.videoHeight;
+    const hasSize = this.videoEl.readyState >= 2 && w > 0 && h > 0;
+    parts.push(hasSize ? `实时 ${w}×${h}` : '分辨率获取中');
+    const hints = [hasSize ? `当前播放分辨率：${w}×${h}（宽×高）` : '等待当前视频画面'];
+    if (src.w && src.h) hints.push(`源流标称分辨率：${src.w}×${src.h}`);
+    hints.push('帧率、码率为流声明值；↓为本地下载速度');
+    el.title = hints.join('\n');
     const fps = src.fps || st.fps;
     if (fps) parts.push(`${fps}fps`);
     const kbps = src.kbps || st.metaKbps;
@@ -285,9 +300,9 @@ class LivePlayer {
       this.statusEl.title = this.lastError;
       this.recover(this.lastError);
     });
-    // 兜底元数据：所拉那档流自带的声明值（分辨率/标称帧率/编码码率）。
-    // 只在房间接口没给源流标称值(room.src)时才展示 —— 它反映的是本地拉的档位，不是源流。
+    // 所拉档位自带的声明值；分辨率显示始终以 video 实际尺寸为准。
     player.on(window.mpegts.Events.MEDIA_INFO, (mi) => {
+      if (this.destroyed || this.player !== player) return;
       if (!this.room.stats) this.room.stats = {};
       this.room.stats.w = mi.width || this.room.stats.w || 0;
       this.room.stats.h = mi.height || this.room.stats.h || 0;
@@ -307,7 +322,7 @@ class LivePlayer {
     this._lastSpeedTs = 0;
     const STAT_WINDOW_MS = 5000;
     player.on(window.mpegts.Events.STATISTICS_INFO, (s) => {
-      if (this.destroyed) return;
+      if (this.destroyed || this.player !== player) return;
       if (!this.room.stats) this.room.stats = {};
       const now = (window.performance && performance.now()) || Date.now();
       // 把"上一秒速率"积分成累计字节(速率×时间=字节)，与采样频率无关，恒等于真实已下载量
@@ -531,6 +546,9 @@ class LivePlayer {
 
   destroy() {
     this.destroyed = true;
+    this.videoEl.removeEventListener('loadedmetadata', this.onVideoSizeChange);
+    this.videoEl.removeEventListener('resize', this.onVideoSizeChange);
+    this.videoEl.removeEventListener('emptied', this.onVideoSizeChange);
     this.clearTimers();
     this.destroyPlayer();
   }
@@ -546,8 +564,7 @@ function applyLayout() {
   const W = gridEl.clientWidth - LAYOUT_PAD * 2;
   const H = gridEl.clientHeight - LAYOUT_PAD * 2;
   if (W <= 0 || H <= 0) return;
-  // 手动指定列数时按它（但不超过路数）；自动时试所有列数取最大面积
-  const forced = state.cols !== 'auto' ? Math.min(Number(state.cols), n) : null;
+  // 根据可见房间数和窗口尺寸，自动选择画面面积最大的列数。
   let best = { area: 0, cellW: 0, cols: 1 };
   const tryCols = (cols) => {
     if (cols < 1) return;
@@ -560,8 +577,7 @@ function applyLayout() {
     }
     if (cellW > 0 && cellW * cellH > best.area) best = { area: cellW * cellH, cellW, cols };
   };
-  if (forced) tryCols(forced);
-  else for (let c = 1; c <= n; c++) tryCols(c);
+  for (let c = 1; c <= n; c++) tryCols(c);
   if (best.cellW > 0) {
     const w = Math.floor(best.cellW);
     gridEl.style.setProperty('--cell-w', w + 'px');
@@ -1158,16 +1174,6 @@ searchList.addEventListener('click', (event) => {
   if (button) addSearchCandidate(Number(button.dataset.candidate));
 });
 
-document.querySelectorAll('.col-btn').forEach((btn) => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('.col-btn').forEach((b) => b.classList.remove('active'));
-    btn.classList.add('active');
-    state.cols = btn.dataset.cols;
-    persist();
-    applyLayout();
-  });
-});
-
 // 窗口尺寸变化 → 重新计算 9:16 格子大小
 window.addEventListener('resize', applyLayout);
 
@@ -1212,30 +1218,46 @@ document.addEventListener('click', (e) => {
 });
 
 // 返回宫格（关闭真实页详情）
-// 扫码登录抖音 + 登录状态
+// 各平台登录状态与访问限制分别展示。
 const btnLogin = document.getElementById('btn-login');
 const loginDot = document.getElementById('login-dot');
-function updateLoginUI(ok) {
+let loginStatusGeneration = 0;
+function updateLoginUI(value) {
+  const auth = value && typeof value === 'object' ? value : { loggedIn: value };
+  const ok = auth.loggedIn;
+  const restricted = ['restricted', 'verification_required'].includes(auth.status);
   const name = platformApi.PLATFORMS[state.platform].name;
+  const label = auth.status === 'checking' ? '检测登录中…'
+    : restricted ? (ok === true ? '已登录 · 搜索受限' : '搜索受限')
+    : ok === true ? '已登录' : ok === false ? '未登录' : '登录状态未知';
+  const detail = `${name}：${label}${auth.message ? `。${auth.message}` : ''}${auth.code ? `（错误码 ${auth.code}）` : ''}`;
   if (btnLogin) {
-    btnLogin.textContent = ok === true ? `已登录${name}（切换账号）` : `登录${name}`;
+    btnLogin.textContent = restricted ? '打开官方窗口处理 / 切换账号' : ok === true ? `已登录${name}（切换账号）` : `登录${name}`;
     btnLogin.classList.toggle('btn-primary', ok !== true);
   }
   if (loginDot) {
-    loginDot.classList.toggle('on', ok === true);
-    loginDot.title = ok === null ? `${name}登录状态请在官方窗口确认` : `${name}登录状态：${ok ? '已登录' : '未登录'}`;
+    loginDot.classList.toggle('on', ok === true && !restricted);
+    loginDot.classList.toggle('warning', restricted);
+    loginDot.title = `${detail}。点击打开官方窗口`;
   }
+  const text = document.getElementById('login-status-text');
+  if (text) text.textContent = label;
+  const info = document.getElementById('login-status-detail');
+  if (info) info.textContent = detail;
 }
 async function refreshLoginStatus() {
+  const generation = ++loginStatusGeneration;
   const platform = state.platform;
   try {
     const ok = await window.mini.getLoginStatus(platform);
-    if (state.platform === platform) updateLoginUI(ok);
-  } catch { if (state.platform === platform) updateLoginUI(null); }
+    if (state.platform === platform && generation === loginStatusGeneration) updateLoginUI(ok);
+  } catch { if (state.platform === platform && generation === loginStatusGeneration) updateLoginUI(null); }
 }
 if (btnLogin) btnLogin.addEventListener('click', () => { window.mini.openLogin(state.platform); toast('请在弹出的官方窗口里登录'); });
+if (loginDot) loginDot.addEventListener('click', () => window.mini.openLogin(state.platform));
+window.addEventListener('focus', refreshLoginStatus);
 if (window.mini.onLoginStatus) window.mini.onLoginStatus((payload) => {
-  if (payload && payload.platform === state.platform) updateLoginUI(payload.loggedIn);
+  if (payload && payload.platform === state.platform) { loginStatusGeneration++; updateLoginUI(payload); }
 });
 // 全局清晰度
 if (globalQualityEl) globalQualityEl.addEventListener('change', () => setGlobalQuality(globalQualityEl.value));
@@ -1477,7 +1499,7 @@ function closeSearch() {
 
 function renderSearchResults() {
   searchTitle.textContent = `搜索“${searchResult.keyword}”`;
-  searchLogin.textContent = `登录${platformApi.PLATFORMS[state.platform].name}`;
+  searchLogin.textContent = searchResult.auth?.status === 'restricted' ? '打开官方窗口处理 / 切换账号' : `登录${platformApi.PLATFORMS[state.platform].name}`;
   searchLogin.hidden = !['login_required', 'error'].includes(searchResult.status);
   searchRetry.hidden = searchResult.status === 'loading';
   searchMessage.textContent = searchResult.status === 'loading' ? '正在搜索直播间…'
@@ -1538,7 +1560,7 @@ function applyPlatformUI() {
   document.getElementById('platform-description').textContent = isXhs
     ? '输入名字搜索小红书直播间，在结果中点击添加即可上墙。需要登录时按提示扫码，再重新搜索。弹幕、礼物和战况暂未接入。'
     : '输入名字搜索抖音直播间，点击结果即可上墙。登录后可在详情中使用官方互动功能。';
-  updateLoginUI(null);
+  updateLoginUI({ status: 'checking', loggedIn: null });
   refreshLoginStatus();
 }
 
@@ -1560,7 +1582,7 @@ function restoreProfile(platform) {
       wall.push(id);
     }
   }
-  state.cols = saved && saved.cols || 'auto';
+  state.cols = 'auto'; // 旧版保存的手动列数统一迁移为自动布局。
   savedQuality = saved && saved.quality || {};
   state.globalQuality = saved && saved.globalQuality || 'auto';
   state.hudAlways = !!(saved && saved.hudAlways);
@@ -1572,7 +1594,6 @@ function restoreProfile(platform) {
   state.rooms = [];
   state.soloId = null;
   for (const id of wall) putOnWall(id, { noRender: true });
-  document.querySelectorAll('.col-btn').forEach((button) => button.classList.toggle('active', button.dataset.cols === String(state.cols)));
   globalQualityEl.value = state.globalQuality;
   applyHudAlways();
   applyOverlayToggles();

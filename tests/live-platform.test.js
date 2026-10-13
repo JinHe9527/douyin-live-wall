@@ -4,7 +4,7 @@ const platform = require('../lib/live-platform');
 
 test('名称进入所属平台搜索，数字房间号按平台解析', () => {
   assert.equal(platform.parseInput('宇宙k', 'xiaohongshu').kind, 'keyword');
-  assert.match(platform.searchUrl('宇宙k', 'xiaohongshu'), /xiaohongshu\.com\/search_result\?keyword=/);
+  assert.match(platform.searchUrl('宇宙k', 'xiaohongshu'), /xiaohongshu\.com\/search_result_ai\?keyword=/);
   assert.match(platform.searchUrl('宇宙k', 'douyin'), /douyin\.com\/search\/.+type=live/);
   assert.equal(platform.parseInput('570321613446566013', 'xiaohongshu').url, 'https://www.xiaohongshu.com/livestream/570321613446566013');
 });

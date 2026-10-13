@@ -11,7 +11,7 @@ function harness(saved, search = async () => ({ status: 'success', candidates: [
     return {
       value: '', hidden: false, dataset: {}, style: { setProperty() {} },
       classList: { add() {}, remove() {}, toggle() {} },
-      addEventListener() {}, querySelectorAll: () => [], querySelector: () => element(),
+      addEventListener() {}, removeEventListener() {}, querySelectorAll: () => [], querySelector: () => element(),
       insertAdjacentHTML() {}, remove() {}, clientWidth: 1280, clientHeight: 860,
     };
   }
@@ -23,7 +23,7 @@ function harness(saved, search = async () => ({ status: 'success', candidates: [
     setAutoRecordingConfig: (data) => calls.recording.push(data),
     setInfoMode: (...args) => calls.info.push(args),
     getLoginStatus: async () => null,
-    onLoginStatus() {}, onDanmuBatch() {}, onRecordingStatus() {},
+    onLoginStatus: (callback) => { calls.loginStatus = callback; }, onDanmuBatch() {}, onRecordingStatus() {},
     onRoomSelected: (callback) => { calls.select = callback; },
     search: (...args) => { calls.searches.push(args); return search(...args); },
     cancelSearch() {}, watchAudience() {}, onAudience() {},
@@ -39,9 +39,84 @@ function harness(saved, search = async () => ({ status: 'success', candidates: [
     setInterval() {}, setTimeout() {}, clearTimeout() {},
   });
   vm.runInContext(fs.readFileSync(require.resolve('../mini-app/grid.js'), 'utf8')
-    + '\nwindow.testApi = { state, players, LivePlayer, switchPlatform, addFromInput, persist, searchRooms, addSearchCandidate, closeSearch, applyAudience, audienceText };', context);
+    + '\nwindow.testApi = { state, players, LivePlayer, switchPlatform, addFromInput, persist, searchRooms, addSearchCandidate, closeSearch, applyAudience, audienceText, updateLoginUI, refreshLoginStatus };', context);
   return { api: context.window.testApi, window: context.window, mini, element, calls, elements, settle: () => new Promise(setImmediate) };
 }
+
+test('两个平台显示当前播放尺寸，随视频 resize 更新而不被原画标称值覆盖', async () => {
+  for (const platformName of ['douyin', 'xiaohongshu']) {
+    const h = harness({ library: [], wall: [] });
+    await h.settle();
+    const events = new Map();
+    const video = { ...h.element(), readyState: 4, videoWidth: 720, videoHeight: 1280,
+      addEventListener: (name, callback) => events.set(name, callback),
+      removeEventListener: (name, callback) => { if (events.get(name) === callback) events.delete(name); },
+    };
+    const stats = h.element();
+    const cell = { querySelector: () => stats };
+    h.elements.get('grid').querySelector = () => cell;
+    const room = { id: 'sized', platform: platformName, status: 'live',
+      src: { w: 1080, h: 1920 }, stats: { w: 1080, h: 1920 } };
+    const player = new h.api.LivePlayer(video, h.element(), room);
+    events.get('loadedmetadata')();
+    assert.match(stats.textContent, /实时 720×1280/);
+    assert.doesNotMatch(stats.textContent, /1080×1920/);
+    assert.match(stats.title, /源流标称分辨率：1080×1920/);
+    video.videoWidth = 540;
+    video.videoHeight = 960;
+    events.get('resize')();
+    assert.match(stats.textContent, /实时 540×960/);
+    video.readyState = 0;
+    video.videoWidth = video.videoHeight = 0;
+    events.get('emptied')();
+    assert.match(stats.textContent, /分辨率获取中/);
+    assert.doesNotMatch(stats.textContent, /\d+×\d+/);
+    room.status = 'offline';
+    video.readyState = 4;
+    video.videoWidth = 540;
+    video.videoHeight = 960;
+    events.get('resize')();
+    assert.equal(stats.textContent, '');
+    assert.equal(stats.title, '');
+    player.destroy();
+    assert.equal(events.has('resize'), false);
+    assert.equal(events.has('loadedmetadata'), false);
+    assert.equal(events.has('emptied'), false);
+  }
+});
+
+test('共享画面的房间也从自己的视频读取实时分辨率', async () => {
+  const h = harness({ library: [], wall: [] });
+  await h.settle();
+  const stats = h.element();
+  h.elements.get('grid').querySelector = () => ({ querySelector: () => stats });
+  const video = { ...h.element(), readyState: 4, videoWidth: 1080, videoHeight: 1920 };
+  const player = new h.api.LivePlayer(video, h.element(), { id: 'mirror', status: 'live', stats: { w: 720, h: 1280 } });
+  player.sharedSource = { room: { stats: { w: 720, h: 1280 } } };
+  player.updateStats();
+  assert.match(stats.textContent, /实时 1080×1920/);
+});
+
+test('登录文字区分未知、未登录和已登录但受限，旧检测结果不覆盖新异常', async () => {
+  const h = harness({ activePlatform: 'xiaohongshu', profiles: { xiaohongshu: { library: [], wall: [] } } });
+  await h.settle();
+  h.api.updateLoginUI(null);
+  assert.equal(h.elements.get('login-status-text').textContent, '登录状态未知');
+  h.api.updateLoginUI(false);
+  assert.equal(h.elements.get('login-status-text').textContent, '未登录');
+  h.api.updateLoginUI(true);
+  assert.equal(h.elements.get('login-status-text').textContent, '已登录');
+  let resolve;
+  h.mini.getLoginStatus = () => new Promise(r => { resolve = r; });
+  const pending = h.api.refreshLoginStatus();
+  h.calls.loginStatus({ platform: 'xiaohongshu', loggedIn: true, status: 'restricted', message: '账号异常', code: '300011' });
+  resolve(true);
+  await pending;
+  assert.equal(h.elements.get('login-status-text').textContent, '已登录 · 搜索受限');
+  assert.match(h.elements.get('login-status-detail').textContent, /300011/);
+  h.calls.loginStatus({ platform: 'douyin', loggedIn: false });
+  assert.equal(h.elements.get('login-status-text').textContent, '已登录 · 搜索受限');
+});
 
 test('多平台解析保留直播地址和人数，换线沿用原平台并尝试备用流', async () => {
   const h = harness({ activePlatform: 'xiaohongshu', profiles: { xiaohongshu: { library: [], wall: [] } } });
@@ -154,7 +229,7 @@ test('切换平台销毁旧播放器、保存库与设置，切回恢复各自�
   h.api.switchPlatform('douyin');
   await h.settle();
   assert.equal(h.api.state.library[0].id, 'dy');
-  assert.equal(h.api.state.cols, '3');
+  assert.equal(h.api.state.cols, 'auto');
   const saved = h.calls.saves.at(-1);
   assert.equal(saved.profiles.xiaohongshu.library[0].id, 'xhs');
   assert.equal(saved.profiles.douyin.library[0].id, 'dy');

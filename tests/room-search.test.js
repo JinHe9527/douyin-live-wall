@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const vm = require('node:vm');
-const { createRoomSearch, xiaohongshuCandidates } = require('../lib/room-search');
+const { createRoomSearch, xiaohongshuCandidates, xiaohongshuOfflineAnchors } = require('../lib/room-search');
 
 function searchHarness(page = { candidates: [{ title: '宇宙Dream', roomUrl: 'https://www.xiaohongshu.com/livestream/570487763509191279' }], status: 'success' }) {
   const windows = [];
@@ -39,6 +39,7 @@ test('后台搜索先初始化页面再捕获官方结果，返回候选后释�
   assert.equal(result.candidates[0].title, '宇宙Dream');
   assert.equal(h.windows[0].options.show, false);
   assert.equal(h.windows[0].options.webPreferences.session, 'persist:xiaohongshu');
+  assert.equal(h.windows[0].loaded.at(-1), 'https://www.xiaohongshu.com/');
   assert.equal(h.windows[0].destroyed, true);
   assert.equal(h.windows[0].attached, false);
 });
@@ -73,13 +74,31 @@ test('用户直播入口支持 camelCase；普通笔记和不安全数字不能�
   assert.equal(result[0].isLive, true);
 });
 
-function officialSearchPage(store) {
+function officialSearchPage(store, { ready = () => true, onSubmit = () => {} } = {}) {
   const root = { __vue_app__: { config: { globalProperties: { $pinia: { _s: new Map([['search', store]]) } } } } };
-  const context = vm.createContext({ URL, window: {}, document: {
-    body: { innerText: '' }, querySelector: () => root, querySelectorAll: () => [],
+  const input = { value: '', dispatchEvent(event) { assert.equal(event.type, 'input'); },
+    parentElement: { querySelector: () => ({ click() { assert.equal(input.value, store.searchContext.keyword); onSubmit(); } }) } };
+  const context = vm.createContext({ URL, Event: class { constructor(type) { this.type = type; } }, location: { href: 'https://www.xiaohongshu.com/explore' }, window: {}, document: {
+    get readyState() { return ready() ? 'complete' : 'loading'; }, body: { innerText: '' }, querySelector: (selector) => selector === '#search-input' ? input : root, querySelectorAll: () => [],
   } });
   return (expression) => vm.runInContext(expression, context);
 }
+
+test('首页初始化完成后才提交官方搜索框，避免提前点击无效导致超时', async () => {
+  let hydrated = false, submissions = 0;
+  const store = { state: 'success', fetchUserListsStatus: 'success', searchContext: { keyword: '宇宙-S1' },
+    userLists: [{ name: '宇宙-S1', liveInfo: { status: 2, roomId: '570494805124006977' } }] };
+  const read = officialSearchPage(store, { ready: () => hydrated, onSubmit: () => { assert.equal(hydrated, true); submissions++; } });
+  const h = searchHarness(expression => {
+    const result = read(expression);
+    if (!hydrated) { assert.equal(submissions, 0); hydrated = true; }
+    return result;
+  });
+  const result = await h.search('宇宙-S1', 'xiaohongshu');
+  assert.equal(result.status, 'success');
+  assert.equal(result.candidates[0].title, '宇宙-S1');
+  assert.equal(submissions, 1);
+});
 
 test('笔记页无直播时继续查询主播用户，X-RAY 用户直播可以添加', async () => {
   let calls = 0;
@@ -115,6 +134,17 @@ test('用户查询失败不能把笔记查询成功当成没有直播', async ()
   assert.equal((await h.search('X-RAY', 'xiaohongshu')).status, 'error');
 });
 
+test('小红书空白账号异常页立即返回平台原因，不等待搜索超时或误报无直播', async () => {
+  const context = vm.createContext({ URL, location: { href: 'https://www.xiaohongshu.com/website-login/error?error_code=300011&error_msg=' + encodeURIComponent('当前账号存在异常，请切换账号后重试') } });
+  const h = searchHarness(expression => vm.runInContext(expression, context));
+  const result = await h.search('宇宙', 'xiaohongshu');
+  assert.equal(result.status, 'login_required');
+  assert.equal(result.auth.status, 'restricted');
+  assert.match(result.message, /当前账号存在异常/);
+  assert.match(result.message, /300011/);
+  assert.equal(h.windows[0].destroyed, true);
+});
+
 test('用户直播状态必须在播，保留直播授权而不使用主页授权', () => {
   const result = xiaohongshuCandidates({ users: [
     { name: '在播', live_info: { status: 2, room_id: '123456789', room_id_token: { xsec_token: 'live-token' }, xsec_token: 'profile-token' } },
@@ -124,4 +154,26 @@ test('用户直播状态必须在播，保留直播授权而不使用主页授�
   assert.equal(result.length, 1);
   assert.equal(result[0].title, '在播');
   assert.equal(new URL(result[0].roomUrl).searchParams.get('xsec_token'), 'live-token');
+});
+
+test('只有明确的官方未开播状态才能形成主播离线结果，缺失或未知不能冒充离线', () => {
+  const result = xiaohongshuOfflineAnchors([
+    { name: '宇宙009-N', id: 'host-n', liveInfo: { status: 0 } },
+    { name: '已结束', id: 'ended', live_info: { status: 3 } },
+    { name: '正在直播', id: 'live', liveInfo: { status: 2 } },
+    { name: '缺失', id: 'missing' },
+    { name: '空值', id: 'null', liveInfo: { status: null } },
+    { name: '未知', id: 'unknown', liveInfo: { status: 8 } },
+  ]);
+  assert.deepEqual(result, [{ title: '宇宙009-N', anchorId: 'host-n' }, { title: '已结束', anchorId: 'ended' }]);
+});
+
+test('没有在播候选时仍返回官方确认的未开播主播', async () => {
+  const store = { state: 'success', fetchUserListsStatus: 'success', searchContext: { keyword: '宇宙009-N' },
+    userLists: [{ name: '宇宙009-N', id: 'host-n', liveInfo: { status: 0 } }] };
+  const h = searchHarness(officialSearchPage(store));
+  const result = await h.search('宇宙009-N', 'xiaohongshu');
+  assert.equal(result.status, 'success');
+  assert.equal(result.candidates.length, 0);
+  assert.equal(result.offlineAnchors[0].anchorId, 'host-n');
 });

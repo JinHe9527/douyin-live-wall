@@ -36,7 +36,6 @@ html, body {
   -webkit-app-region: drag;
 }
 .topbar .add-box,
-.topbar .cols-ctrl,
 .topbar .quality-ctrl,
 .topbar button,
 .topbar input,
@@ -114,18 +113,7 @@ button:focus-visible, select:focus-visible { outline: 2px solid var(--accent); o
 }
 .btn-primary:hover { background: linear-gradient(180deg, var(--accent), var(--accent-2)); filter: brightness(1.08); }
 
-.cols-ctrl { display: flex; align-items: center; gap: 4px; }
 .cols-label { font-size: 12px; color: var(--muted); margin-right: 4px; }
-.col-btn {
-  width: 30px; height: 26px;
-  font-size: 12px;
-  color: var(--muted);
-  background: transparent;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  cursor: pointer;
-}
-.col-btn.active { color: #03121a; background: var(--accent); border-color: transparent; font-weight: 600; }
 
 /* —— 宫格 —— */
 .grid {
@@ -559,18 +547,22 @@ button:focus-visible, select:focus-visible { outline: 2px solid var(--accent); o
 }
 .detail-backdrop[hidden] { display: none; }
 
-/* 登录状态小圆点（顶栏） */
-.login-dot {
+/* 登录状态常驻文字，颜色仅作为辅助。 */
+.login-status { flex: none; white-space: nowrap; }
+.login-status::before {
+  content: ''; display: inline-block; margin-right: 6px; vertical-align: 1px;
   -webkit-app-region: no-drag;
   width: 9px; height: 9px; flex: none;
   border-radius: 50%;
   background: #5a6472;
   box-shadow: 0 0 0 2px rgba(255, 255, 255, .06);
 }
-.login-dot.on {
+.login-status.on::before {
   background: #38d39f;
   box-shadow: 0 0 7px rgba(56, 211, 159, .8);
 }
+.login-status.warning { color: #ffd18a; border-color: #8a6535; }
+.login-status.warning::before { background: #ffd18a; }
 
 /* 单格清晰度按钮 + 菜单 */
 .cell-quality { position: relative; }
