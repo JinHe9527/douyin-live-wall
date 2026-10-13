@@ -190,7 +190,12 @@ class LivePlayer {
     if (t && text != null) t.textContent = text;
     // 非直播状态：清掉在线/分辨率/帧率/码率 + 红点（下播了就不显示这些）
     const live = stateName === 'live';
-    if (!live) { this.room.stats = {}; this.room.src = null; this.room.count = ''; this.room.countExact = false; }
+    if (!live) {
+      this.room.stats = {}; this.room.src = null; this.room.count = ''; this.room.countExact = false;
+      for (const key of ['totalViewers', 'totalViews']) {
+        delete this.room[key]; delete this.room[`${key}ObservedAt`]; delete this.room[`${key}Realtime`];
+      }
+    }
     if (stateName === 'offline') syncInfoMode();
     updateCellMeta(this.room);
     this.updateStats();
@@ -222,12 +227,17 @@ class LivePlayer {
     const parts = [];
     const audience = audienceText(this.room);
     if (audience) parts.push(audience);
+    if (this.room.totalViewers != null) parts.push(`场观 ${this.room.totalViewers} 人`);
+    if (this.room.totalViews != null) parts.push(`累计 ${this.room.totalViews} 人次`);
     const w = this.videoEl.videoWidth, h = this.videoEl.videoHeight;
     const hasSize = this.videoEl.readyState >= 2 && w > 0 && h > 0;
     parts.push(hasSize ? `实时 ${w}×${h}` : '分辨率获取中');
     const hints = [hasSize ? `当前播放分辨率：${w}×${h}（宽×高）` : '等待当前视频画面'];
     if (src.w && src.h) hints.push(`源流标称分辨率：${src.w}×${src.h}`);
     hints.push('帧率、码率为流声明值；↓为本地下载速度');
+    if (this.room.totalViewers != null || this.room.totalViews != null) {
+      hints.push('场观为平台累计看过人数；观看人次可能包含重复进入。平台消息有更新时同步，否则约每90秒刷新。');
+    }
     el.title = hints.join('\n');
     const fps = src.fps || st.fps;
     if (fps) parts.push(`${fps}fps`);
@@ -607,6 +617,16 @@ function escapeHtml(s) {
 const QUALITY_LABEL = { auto: '自动', origin: '原画', hd: '高清', sd: '标清', fluent: '流畅' };
 
 function applyAudience(room, result) {
+  if (result.webRid && room.webRid && String(result.webRid) !== String(room.webRid)) return;
+  for (const key of ['totalViewers', 'totalViews']) {
+    if (!Object.prototype.hasOwnProperty.call(result, key)) continue;
+    // 场观与在线人数独立更新；新的实时累计值优先于短期内的页面快照。
+    if (room[`${key}Realtime`] && !result.totalsRealtime && Date.now() - room[`${key}ObservedAt`] < 90000) continue;
+    if (result[key] == null || result[key] === '') delete room[key];
+    else room[key] = String(result[key]);
+    room[`${key}ObservedAt`] = result.observedAt || Date.now();
+    room[`${key}Realtime`] = result.totalsRealtime === true;
+  }
   if (!Object.prototype.hasOwnProperty.call(result, 'userCount')) return;
   if (room.countExact && !result.countExact && Date.now() - room.countObservedAt < 60000) return;
   room.count = result.userCount == null ? '' : String(result.userCount);
@@ -1350,7 +1370,7 @@ window.mini.onRecordingStatus((payload) => {
 window.mini.onAudience((payload) => {
   if (state.platform !== 'xiaohongshu') return;
   const room = state.rooms.find((item) => item.id === payload.id);
-  if (!room) return;
+  if (!room || ['offline', 'ended'].includes(room.status)) return;
   applyAudience(room, payload);
   updateCellMeta(room);
   const player = players.get(room.id);

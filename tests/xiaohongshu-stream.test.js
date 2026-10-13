@@ -24,6 +24,14 @@ test('官方页面 liveStatus=end 表示直播已结束', () => {
   assert.equal(result.status, 'offline');
 });
 
+test('在线展示模式仍保留官方累计看过人数和观看人次', () => {
+  const result = parseLivePage(page({ pullConfig: streams, viewerInfoDisplayType: 0,
+    displayMemberCount: '155', displayViewerCount: '4958', pv: 9117 }), '123');
+  assert.equal(result.userCount, '155');
+  assert.equal(result.totalViewers, '4958');
+  assert.equal(result.totalViews, '9117');
+});
+
 test('旧场次保留原主播名字，绝不把推荐房间当作当前直播', () => {
   const result = parseLivePage(page({}, { liveStatus: 'end',
     roomData: { hostInfo: { nickName: '宇宙-K' }, roomInfo: { status: 3 } },

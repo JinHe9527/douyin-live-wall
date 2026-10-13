@@ -303,6 +303,29 @@ test('人数更新保留零、明确看过口径，缺失时清空旧数值', ()
   assert.equal(h.api.audienceText(room), '100+ 在线');
 });
 
+test('场观独立于在线人数更新，实时值优先且丢弃上一场的迟到消息', () => {
+  const h = harness({ library: [], wall: [] });
+  const room = { status: 'live', webRid: 'new', count: '155', countExact: true, countObservedAt: Date.now() };
+  h.api.applyAudience(room, { userCount: '10+', totalViewers: '4958', totalViews: '9117' });
+  assert.equal(room.count, '155');
+  assert.equal(room.totalViewers, '4958');
+  assert.equal(room.totalViews, '9117');
+  h.api.applyAudience(room, { webRid: 'new', totalViews: '9500', totalsRealtime: true });
+  h.api.applyAudience(room, { webRid: 'new', totalViewers: '5000', totalViews: '9200' });
+  assert.equal(room.totalViewers, '5000');
+  assert.equal(room.totalViews, '9500');
+  h.api.applyAudience(room, { webRid: 'old', totalViewers: '99999', totalViews: '99999' });
+  assert.equal(room.totalViewers, '5000');
+  assert.equal(room.totalViews, '9500');
+  room.totalViewsObservedAt -= 91000;
+  h.api.applyAudience(room, { totalViews: '9600' });
+  assert.equal(room.totalViews, '9600');
+  const player = new h.api.LivePlayer(h.element(), h.element(), room);
+  player.setState('offline', '未开播');
+  assert.equal(room.totalViewers, undefined);
+  assert.equal(room.totalViews, undefined);
+});
+
 test('重启保留主动清空的抖音库，同时恢复非当前平台录制设置', async () => {
   const h = harness({ activePlatform: 'douyin', profiles: {
     douyin: { library: [], wall: [] },
