@@ -24,6 +24,7 @@
         <p id="search-message" class="search-message" role="status" aria-live="polite"></p>
         <div id="search-list" class="search-list"></div>
         <div class="search-actions">
+          <button id="search-use-link" class="btn" hidden>粘贴直播链接观看</button>
           <button id="search-login" class="btn" hidden>登录</button>
           <button id="search-retry" class="btn" hidden>重新搜索</button>
         </div>
@@ -53,7 +54,7 @@
 
     <button id="btn-battle" class="btn" title="比赛战况显示在每格画面上部：任务/展馆进度血条 + 团播成员实时分数与状态（表演中等），数据来自弹幕直连">战况</button>
 
-    <button id="login-dot" class="btn login-status" title="打开官方登录窗口"><span id="login-status-text" role="status" aria-live="polite">检测登录中…</span></button>
+    <button id="login-dot" class="btn login-status" title="默认游客观看，点击管理账号"><span id="login-status-text" role="status" aria-live="polite">游客优先</span></button>
 
     <button id="btn-settings" class="btn btn-icon" title="直播间管理 / 设置">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -75,7 +76,7 @@
   <div id="empty-hint" class="empty-hint">
     <div class="empty-card">
       <div class="empty-title">还没有直播间上墙</div>
-      <div id="empty-description" class="empty-desc">在顶部输入直播间名字搜索，点击正在直播的主播即可上墙。<br>也可以粘贴直播链接或房间号。</div>
+      <div id="empty-description" class="empty-desc">在顶部粘贴直播链接或房间号，直接尝试游客观看。<br>也可以输入名字搜索直播间。</div>
       <button id="btn-open-settings-empty" class="btn btn-primary" style="margin-top:16px;">打开直播间管理</button>
     </div>
   </div>

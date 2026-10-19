@@ -14,7 +14,8 @@ function searchHarness(page = { candidates: [{ title: '宇宙Dream', roomUrl: 'h
       debug.isAttached = () => this.attached;
       debug.detach = () => { this.attached = false; };
       debug.sendCommand = async (command, args) => command === 'Runtime.evaluate' ? { result: { value: typeof page === 'function' ? page(args.expression) : page } } : {};
-      this.webContents = Object.assign(new EventEmitter(), { debugger: debug, setUserAgent() {}, setAudioMuted() {}, setWindowOpenHandler() {}, executeJavaScript: async () => page });
+      this.webContents = Object.assign(new EventEmitter(), { debugger: debug, setUserAgent() {}, setAudioMuted() {}, setWindowOpenHandler() {},
+        executeJavaScript: async expression => typeof page === 'function' ? page(expression) : page });
     }
     loadURL(url) {
       this.loaded.push(url);
@@ -42,6 +43,15 @@ test('后台搜索先初始化页面再捕获官方结果，返回候选后释�
   assert.equal(h.windows[0].loaded.at(-1), 'https://www.xiaohongshu.com/');
   assert.equal(h.windows[0].destroyed, true);
   assert.equal(h.windows[0].attached, false);
+});
+
+test('页眉扫码登录入口不阻断游客已经可见的抖音搜索结果', async () => {
+  const h = searchHarness(expression => expression.includes('document.body')
+    ? vm.runInNewContext(expression, { document: { body: { innerText: '扫码登录 直播搜索结果' }, querySelectorAll: () => [] } })
+    : [{ roomId: '123456789', title: '测试主播', isLive: true }]);
+  const result = await h.search('测试主播', 'douyin');
+  assert.equal(result.status, 'success');
+  assert.equal(result.candidates[0].title, '测试主播');
 });
 
 test('登录或验证提示显式返回；取消旧查询不会关闭新查询', async () => {

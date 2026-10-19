@@ -101,9 +101,9 @@ test('登录文字区分未知、未登录和已登录但受限，旧检测结�
   const h = harness({ activePlatform: 'xiaohongshu', profiles: { xiaohongshu: { library: [], wall: [] } } });
   await h.settle();
   h.api.updateLoginUI(null);
-  assert.equal(h.elements.get('login-status-text').textContent, '登录状态未知');
+  assert.equal(h.elements.get('login-status-text').textContent, '游客优先');
   h.api.updateLoginUI(false);
-  assert.equal(h.elements.get('login-status-text').textContent, '未登录');
+  assert.equal(h.elements.get('login-status-text').textContent, '游客观看');
   h.api.updateLoginUI(true);
   assert.equal(h.elements.get('login-status-text').textContent, '已登录');
   let resolve;

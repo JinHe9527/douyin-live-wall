@@ -14,6 +14,7 @@ const searchTitle = document.getElementById('search-title');
 const searchMessage = document.getElementById('search-message');
 const searchList = document.getElementById('search-list');
 const searchLogin = document.getElementById('search-login');
+const searchUseLink = document.getElementById('search-use-link');
 const searchRetry = document.getElementById('search-retry');
 let searchGeneration = 0;
 let searchResult = { keyword: '', platform: '', status: '', candidates: [] };
@@ -1247,10 +1248,10 @@ function updateLoginUI(value) {
   const ok = auth.loggedIn;
   const restricted = ['restricted', 'verification_required'].includes(auth.status);
   const name = platformApi.PLATFORMS[state.platform].name;
-  const label = auth.status === 'checking' ? '检测登录中…'
+  const label = auth.status === 'checking' ? '游客优先'
     : restricted ? (ok === true ? '已登录 · 搜索受限' : '搜索受限')
-    : ok === true ? '已登录' : ok === false ? '未登录' : '登录状态未知';
-  const detail = `${name}：${label}${auth.message ? `。${auth.message}` : ''}${auth.code ? `（错误码 ${auth.code}）` : ''}`;
+    : ok === true ? '已登录' : ok === false ? '游客观看' : '游客优先';
+  const detail = `${name}：${label}。播放优先使用独立游客会话，粘贴直播链接即可尝试观看${auth.message ? `。${auth.message}` : ''}${auth.code ? `（错误码 ${auth.code}）` : ''}`;
   if (btnLogin) {
     btnLogin.textContent = restricted ? '打开官方窗口处理 / 切换账号' : ok === true ? `已登录${name}（切换账号）` : `登录${name}`;
     btnLogin.classList.toggle('btn-primary', ok !== true);
@@ -1521,6 +1522,7 @@ function renderSearchResults() {
   searchTitle.textContent = `搜索“${searchResult.keyword}”`;
   searchLogin.textContent = searchResult.auth?.status === 'restricted' ? '打开官方窗口处理 / 切换账号' : `登录${platformApi.PLATFORMS[state.platform].name}`;
   searchLogin.hidden = !['login_required', 'error'].includes(searchResult.status);
+  searchUseLink.hidden = !['login_required', 'error'].includes(searchResult.status);
   searchRetry.hidden = searchResult.status === 'loading';
   searchMessage.textContent = searchResult.status === 'loading' ? '正在搜索直播间…'
     : searchResult.message || (searchResult.candidates.length ? `找到 ${searchResult.candidates.length} 个直播间，点击添加即可上墙` : '未找到正在直播的房间，请确认名字或稍后重试');
@@ -1531,6 +1533,13 @@ function renderSearchResults() {
     return `<div class="search-row">${avatar}<div class="search-copy"><strong>${escapeHtml(item.title)}</strong><p>${escapeHtml(item.subtitle || '直播中')}</p></div><button class="btn btn-primary" data-candidate="${index}" ${added ? 'disabled' : ''}>${added ? '已添加' : '添加'}</button></div>`;
   }).join('');
 }
+
+searchUseLink.addEventListener('click', () => {
+  closeSearch();
+  inputEl.value = '';
+  inputEl.placeholder = '粘贴直播分享链接或房间号，回车观看';
+  inputEl.focus();
+});
 
 function addSearchCandidate(index) {
   if (searchResult.platform !== state.platform || searchResult.status !== 'success') return;
@@ -1574,12 +1583,12 @@ function applyPlatformUI() {
   platformSelect.value = state.platform;
   document.body.dataset.livePlatform = state.platform;
   document.title = `${name}直播墙`;
-  inputEl.placeholder = `搜索${name}直播间名字，或粘贴直播链接 / 房间号`;
+  inputEl.placeholder = `粘贴${name}直播链接 / 房间号观看，或输入名字搜索`;
   libUrlEl.placeholder = isXhs ? '搜索直播间名字，或粘贴小红书直播分享链接' : '搜索直播间名字，或粘贴主播主页 / 直播链接';
   for (const button of [btnDanmu, btnGifts, btnBattle]) button.hidden = isXhs;
   document.getElementById('platform-description').textContent = isXhs
-    ? '输入名字搜索小红书直播间，在结果中点击添加即可上墙。需要登录时按提示扫码，再重新搜索。弹幕、礼物和战况暂未接入。'
-    : '输入名字搜索抖音直播间，点击结果即可上墙。登录后可在详情中使用官方互动功能。';
+    ? '粘贴当前直播分享链接，优先以游客身份观看。名称搜索可能需要登录；旧场次结束后，可粘贴主播的新分享链接。弹幕、礼物和战况暂未接入。'
+    : '粘贴直播链接或房间号，优先以游客身份观看。也可以输入名字搜索，登录后可在详情中使用官方互动功能。';
   updateLoginUI({ status: 'checking', loggedIn: null });
   refreshLoginStatus();
 }

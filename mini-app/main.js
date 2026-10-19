@@ -5,7 +5,8 @@
 const path = require('path');
 const fs = require('fs');
 const { app, BrowserWindow, WebContentsView, session, ipcMain, dialog, shell, net, Menu } = require('electron');
-const { resolveStream } = require('../lib/douyin-stream');
+const { createDouyinResolver } = require('../lib/douyin-resolver');
+const { playbackSession, resolveGuestFirst } = require('../lib/playback-access');
 const xiaohongshuStream = require('../lib/xiaohongshu-stream');
 const { createXiaohongshuTracker } = require('../lib/xiaohongshu-tracker');
 const { createDesktopStreamReader } = require('../lib/xiaohongshu-desktop');
@@ -38,8 +39,6 @@ const MOBILE_UA =
 const CDN_HOST_RE = /(\.douyincdn\.com|\.douyin\.com|\.amemv\.com|\.bytedance\.|\.bytecdn\.|pull-)/i;
 
 let mainWin = null;
-let resolverWin = null;
-let resolverReady = null; // Promise：并发调用共享同一次建窗，避免开机 8 路并发各建一窗漏窗
 const autoRecorders = new Map();
 let activePlatform = 'douyin';
 const platformWindows = createPlatformWindows({
@@ -57,16 +56,21 @@ const platformWindows = createPlatformWindows({
 const roomSearch = createRoomSearch({ BrowserWindow, session, userAgent: DESKTOP_UA, prepareWindow: blockMediaIn, onAuthStatus: platformWindows.reportSearchAuth });
 const trackingSearch = createRoomSearch({ BrowserWindow, session, userAgent: DESKTOP_UA, prepareWindow: blockMediaIn, onAuthStatus: platformWindows.reportSearchAuth });
 const desktopStreamReader = createDesktopStreamReader({ BrowserWindow, session, userAgent: DESKTOP_UA, prepareWindow: blockMediaIn });
+const douyinResolvers = [true, false].map(guest => createDouyinResolver({ BrowserWindow,
+  getSession: () => playbackSession(session, 'douyin', guest), userAgent: DESKTOP_UA,
+  prepareWindow: blockMediaIn, pauseMedia: keepMediaPaused }));
+function resolveXhs(url, quality, guest) {
+  const fetchPage = (target, init) => playbackSession(session, 'xiaohongshu', guest).fetch(target, init);
+  return xiaohongshuStream.resolveWithDesktop(fetchPage,
+    target => guest ? xiaohongshuStream.readGuestDesktopState(fetchPage, target, DESKTOP_UA)
+      : desktopStreamReader.read(target), url, { quality, preferShare: guest });
+}
 const xiaohongshuTracker = createXiaohongshuTracker({
-  resolve: async (url, quality) => {
-    const result = await xiaohongshuStream.resolveStream(
-      (target, init) => session.fromPartition(PLATFORMS.xiaohongshu.partition).fetch(target, init), url, { quality });
-    if (!result.ok || quality === 'origin') return result;
-    const data = await desktopStreamReader.read(result.roomUrl || url);
-    if (!data) return result;
-    const desktop = xiaohongshuStream.parseLiveState(data, result.webRid, quality);
-    return desktop.ok ? { ...desktop, roomUrl: result.roomUrl || url } : result;
-  },
+  resolve: (url, quality) => resolveGuestFirst({
+    guest: () => resolveXhs(url, quality, true),
+    account: () => resolveXhs(url, quality, false),
+    loginStatus: () => platformWindows.loginStatus('xiaohongshu'),
+  }),
   search: (name) => trackingSearch.search(name, 'xiaohongshu'),
 });
 const audienceMonitor = createAudienceMonitor({ BrowserWindow, session, userAgent: DESKTOP_UA, prepareWindow: blockMediaIn,
@@ -154,125 +158,12 @@ function waitLoad(win, url, timeoutMs = 12000) {
   });
 }
 
-function withTimeout(promise, timeoutMs, label) {
-  let timer;
-  return Promise.race([
-    promise,
-    new Promise((_resolve, reject) => {
-      timer = setTimeout(() => reject(new Error(`${label}-timeout`)), timeoutMs);
-    }),
-  ]).finally(() => clearTimeout(timer));
-}
-
-function invalidateResolver(win) {
-  if (!win || resolverWin !== win) return;
-  resolverWin = null;
-  resolverReady = null;
-  if (!win.isDestroyed()) {
-    try { win.destroy(); } catch {}
-  }
-}
-
-// 常驻隐藏解析页：停在 live.douyin.com（带 persist:douyin 登录），供 resolveStream 用。
-// 并发安全：用 promise 记忆化，开机多路 resolve 同时调用只会建 1 个窗口（同 ensureDanmuHub 写法）。
-function ensureResolver(douyinSession) {
-  if (resolverReady && resolverWin && !resolverWin.isDestroyed()) return resolverReady;
-  const win = new BrowserWindow({
-      show: false,
-      webPreferences: { session: douyinSession, offscreen: false },
-  });
-  resolverWin = win;
-  win.once('closed', () => invalidateResolver(win));
-  win.on('unresponsive', () => invalidateResolver(win));
-  win.webContents.once('render-process-gone', () => invalidateResolver(win));
-  resolverReady = (async () => {
-    win.webContents.setUserAgent(DESKTOP_UA);
-    // 常驻停在 live.douyin.com 首页，首页会自动播推荐直播间且带声 → 必须静音，否则漏「别的直播间」的音
-    win.webContents.setAudioMuted(true);
-    blockMediaIn(win); // 隐藏页不准拉视频流（省一路解码+带宽）
-    await waitLoad(win, 'https://live.douyin.com/');
-    await new Promise((r) => setTimeout(r, 1200));
-    keepMediaPaused(win);
-  })().catch((error) => {
-    invalidateResolver(win);
-    throw error;
-  });
-  return resolverReady;
-}
-
-function resolverRunJs(code) {
-  const win = resolverWin;
-  if (!win || win.isDestroyed()) return Promise.reject(new Error('resolver-unavailable'));
-  return withTimeout(win.webContents.executeJavaScript(code, true), 12000, 'resolver-execute').catch((error) => {
-    invalidateResolver(win);
-    throw error;
-  });
-}
-
-// 独立「导航页」：主页解析/兜底抓取会导航离开 live 首页，单独开一页，
-// 不污染常驻页（常驻页保持在 live 首页，供 web/enter 接口并行 fetch）。
-let navWin = null;
-function invalidateNav(win) {
-  if (!win || navWin !== win) return;
-  navWin = null;
-  if (!win.isDestroyed()) {
-    try { win.destroy(); } catch {}
-  }
-}
-
-async function ensureNav(douyinSession) {
-  if (navWin && !navWin.isDestroyed()) return;
-  const win = new BrowserWindow({
-    show: false,
-    webPreferences: { session: douyinSession, offscreen: false },
-  });
-  navWin = win;
-  win.once('closed', () => invalidateNav(win));
-  win.on('unresponsive', () => invalidateNav(win));
-  win.webContents.once('render-process-gone', () => invalidateNav(win));
-  win.webContents.setUserAgent(DESKTOP_UA);
-  // 兜底解析会导航到直播间页（自动播放带声）→ 同样静音，纯解析窗口不出声
-  win.webContents.setAudioMuted(true);
-  blockMediaIn(win); // 导航页只要 DOM/接口，不准拉视频流
-  win.webContents.on('did-finish-load', () => keepMediaPaused(win)); // 每次导航后都补一针
-  await waitLoad(win, 'about:blank', 3000);
-}
-
-// 导航页串行锁：导航会整页跳转，并发会互相打架，必须排队。
-let navChain = Promise.resolve();
-function withNav(fn) {
-  const run = navChain.then(async () => {
-    await ensureNav(session.fromPartition('persist:douyin'));
-    const win = navWin;
-    const navigate = (url) => waitLoad(win, url);
-    const navRunJs = (code) => withTimeout(win.webContents.executeJavaScript(code, true), 12000, 'nav-execute')
-      .catch((error) => {
-        invalidateNav(win);
-        throw error;
-      });
-    return withTimeout(fn(navigate, navRunJs), 26000, 'nav-run').catch((error) => {
-      invalidateNav(win);
-      throw error;
-    });
-  });
-  navChain = run.catch(() => {});
-  return run;
-}
-
-// 解析上下文：API 走常驻页（并行），导航走串行导航页。
-function makeCtx() {
-  return { apiRunJs: resolverRunJs, withNav };
-}
-
 async function resolvePlatformStream(platform, input, quality, options = {}) {
-  if (platform === 'xiaohongshu') {
-    return xiaohongshuTracker.resolveRoom(input, quality, options);
-  }
-  await ensureResolver(session.fromPartition(PLATFORMS.douyin.partition));
-  return resolveStream(makeCtx(), input, {
-    quality,
-    allowNavigationFallback: options.allowNavigationFallback !== false,
-    forceNavigationFallback: Boolean(options.forceNavigationFallback),
+  if (platform === 'xiaohongshu') return xiaohongshuTracker.resolveRoom(input, quality, options);
+  return resolveGuestFirst({
+    guest: () => douyinResolvers[0].resolve(input, quality, options),
+    account: () => douyinResolvers[1].resolve(input, quality, options),
+    loginStatus: () => platformWindows.loginStatus('douyin'),
   });
 }
 
@@ -304,6 +195,11 @@ async function createWindow() {
   const douyinSession = session.fromPartition('persist:douyin');
   installCdnHeaderRewrite(douyinSession);
   installCdnHeaderRewrite(session.fromPartition(PLATFORMS.xiaohongshu.partition));
+  for (const platform of Object.keys(PLATFORMS)) {
+    const guest = playbackSession(session, platform);
+    guest.setUserAgent(DESKTOP_UA);
+    installCdnHeaderRewrite(guest);
+  }
   douyinSession.setUserAgent(DESKTOP_UA);
   session.fromPartition(PLATFORMS.xiaohongshu.partition).setUserAgent(DESKTOP_UA);
 
@@ -620,6 +516,7 @@ app.on('window-all-closed', () => app.quit());
 app.on('before-quit', () => {
   platformWindows.stop();
   desktopStreamReader.stop();
+  for (const resolver of douyinResolvers) resolver.stop();
   xiaohongshuTracker.stop();
   roomSearch.cancel();
   trackingSearch.cancel();

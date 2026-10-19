@@ -1,11 +1,71 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { parseLivePage, parseLiveState, resolveStream } = require('../lib/xiaohongshu-stream');
+const { parseLivePage, parseLiveState, resolveStream, resolveWithDesktop, readGuestDesktopState } = require('../lib/xiaohongshu-stream');
 
 function page(roomInfo, extra = {}) {
   return `<script>window.__INITIAL_STATE__=${JSON.stringify({ liveStream: { liveStatus: 'success', roomData: { roomInfo }, ...extra } })};</script>`;
 }
 const streams = { h264: ['HD', 'SD', 'LD'].map((quality_type) => ({ quality_type, master_url: `https://live-play.xhscdn.com/live/${quality_type}.flv?token=abc` })) };
+
+test('游客分享页有流即返回，不等待后台桌面窗口', async () => {
+  const result = await resolveWithDesktop(async () => ({ status: 200, text: async () => page({ pullConfig: streams }) }),
+    () => assert.fail('游客已有流，不启动桌面窗口'), '123456', { quality: 'fluent', preferShare: true });
+  assert.equal(result.ok, true);
+  assert.equal(result.quality, 'LD');
+});
+
+test('游客桌面回退读取官方静态页面，拒绝登录跳转及外部链接', async () => {
+  const url = 'https://www.xiaohongshu.com/livestream/123456?xsec_token=keep';
+  const data = await readGuestDesktopState(async (target, init) => {
+    assert.equal(target, url);
+    assert.equal(init.headers['User-Agent'], 'desktop');
+    assert.equal(init.redirect, 'manual');
+    return { status: 200, text: async () => page({ pullConfig: streams }) };
+  }, url, 'desktop');
+  assert.equal(data.roomId, '123456');
+  assert.equal(data.liveStatus, 'success');
+  assert.equal(await readGuestDesktopState(async () => ({ status: 302 }), url, 'desktop'), null);
+  assert.equal(await readGuestDesktopState(() => assert.fail('外部地址不能请求'), 'https://evil.test/123456', 'desktop'), null);
+});
+
+test('游客分享页没有流时仍尝试同房间官方桌面播放器，包括原画模式', async () => {
+  const url = 'https://www.xiaohongshu.com/livestream/123456?xsec_token=keep';
+  for (const quality of ['fluent', 'origin']) {
+    let reads = 0;
+    const result = await resolveWithDesktop(async () => ({ status: 200, text: async () => '<html></html>' }),
+      async target => {
+        reads++; assert.equal(target, url);
+        return { roomId: '123456', liveStatus: 'success', roomData: { roomInfo: { pullConfig: streams } } };
+      }, url, { quality });
+    assert.equal(result.ok, true);
+    assert.equal(reads, 1);
+    assert.equal(result.roomUrl, url);
+  }
+});
+
+test('分享链接跳转后 HTTP 失败也保留最终房间地址供桌面回退', async () => {
+  const url = 'https://www.xiaohongshu.com/livestream/123456?xsec_token=keep';
+  let requests = 0;
+  const result = await resolveWithDesktop(async () => ++requests === 1
+    ? { status: 302, headers: { get: () => url } } : { status: 403 }, async target => {
+    assert.equal(target, url);
+    return { roomId: '123456', liveStatus: 'success', roomData: { roomInfo: { pullConfig: streams } } };
+  }, 'https://xhslink.com/example');
+  assert.equal(result.ok, true);
+});
+
+test('已结束场次不读取推荐流，错误房间及桌面异常不能替换结果', async () => {
+  const url = 'https://www.xiaohongshu.com/livestream/123456';
+  const ended = await resolveWithDesktop(async () => ({ status: 200, text: async () => page({}, { liveStatus: 'end' }) }),
+    () => assert.fail('已结束不读取桌面推荐流'), url);
+  assert.equal(ended.status, 'offline');
+  for (const read of [async () => ({ roomId: '999999', liveStatus: 'success', roomData: { roomInfo: { pullConfig: streams } } }),
+    async () => { throw new Error('network'); }]) {
+    const result = await resolveWithDesktop(async () => ({ status: 200, text: async () => '<html></html>' }), read, url);
+    assert.equal(result.ok, false);
+    assert.equal(result.status, 'unknown');
+  }
+});
 
 test('区分在线人数、累计观看和点赞，保留零人数', () => {
   for (const count of ['100+', 0]) {
