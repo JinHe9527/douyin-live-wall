@@ -30,7 +30,7 @@ test('正在播放时不搜索；同名不同用户不能替换已知主播', as
   });
   assert.equal((await tracker.resolveRoom(fresh, 'hd')).ok, true);
   assert.equal(searches, 0);
-  assert.equal((await tracker.resolveRoom(old, 'hd', { anchorId: 'host-k' })).status, 'offline');
+  assert.equal((await tracker.resolveRoom(old, 'hd', { anchorId: 'host-k' })).status, 'unknown');
 });
 
 test('登录失败、同名歧义不会误报主播下播或播放其他人', async () => {
@@ -45,17 +45,17 @@ test('登录失败、同名歧义不会误报主播下播或播放其他人', as
     assert.equal(value.ok, false);
     assert.equal(value.status, 'unknown');
     assert.equal(requests, 1);
-    if (result.message) assert.equal(value.message, result.message);
+    if (result.message) assert.equal(value.reason, result.message);
   }
 });
 
-test('旧场次明确结束且搜索不到匹配主播时显示未开播，网络失败仍为未知', async () => {
+test('旧场次结束但搜索未确认当前主播状态时保持未知', async () => {
   for (const candidates of [[], [{ ...candidate, title: '其他人' }]]) {
     const tracker = createXiaohongshuTracker({ resolve: async () => ended,
       search: async () => ({ status: 'success', candidates }) });
     const result = await tracker.resolveRoom(old, 'hd');
-    assert.equal(result.status, 'offline');
-    assert.equal(result.message, '未开播');
+    assert.equal(result.status, 'unknown');
+    assert.equal(result.message, '旧场次已结束，暂未找到新场次');
   }
   const tracker = createXiaohongshuTracker({ resolve: async () => ({ ok: false, status: 'unknown' }),
     search: async () => ({ status: 'success', candidates: [] }) });
@@ -63,8 +63,8 @@ test('旧场次明确结束且搜索不到匹配主播时显示未开播，网�
   const endedTracker = createXiaohongshuTracker({ resolve: async () => ended,
     search: async () => ({ status: 'error', message: '搜索超时' }) });
   const endedResult = await endedTracker.resolveRoom(old, 'hd');
-  assert.equal(endedResult.status, 'offline');
-  assert.equal(endedResult.message, '未开播');
+  assert.equal(endedResult.status, 'unknown');
+  assert.equal(endedResult.message, '旧场次已结束，暂未找到新场次');
   assert.equal(endedResult.reason, '搜索超时');
 });
 
@@ -75,6 +75,18 @@ test('新页面主播与搜索不符时不切换；拒绝外部网址', async ()
       search: async () => ({ status: 'success', candidates: [{ ...candidate, roomUrl: url }] }),
     });
     assert.equal((await tracker.resolveRoom(old, 'hd')).status, 'unknown');
+  }
+});
+
+test('已结束场次遇到登录限制或搜索仍返回旧场次时不判主播离线', async () => {
+  for (const result of [
+    { status: 'login_required', message: '请登录小红书' },
+    { status: 'success', candidates: [{ ...candidate, roomUrl: old }] },
+  ]) {
+    const tracker = createXiaohongshuTracker({ resolve: async () => ended, search: async () => result });
+    const value = await tracker.resolveRoom(old, 'sd', { anchorId: candidate.anchorId });
+    assert.equal(value.status, 'unknown');
+    assert.equal(value.message, '旧场次已结束，暂未找到新场次');
   }
 });
 
@@ -105,7 +117,7 @@ test('账号受限时多个主播共用冷却，期限后恢复检查', async ()
   });
   const results = await Promise.all(['甲', '乙', '丙'].map(anchorName => tracker.resolveRoom(old, 'hd', { anchorName })));
   assert.equal(searches, 1);
-  assert.ok(results.every(result => result.message === '账号异常（300011）'));
+  assert.ok(results.every(result => result.reason === '账号异常（300011）'));
   time = 101;
   await tracker.resolveRoom(old, 'hd', { anchorName: '甲' });
   assert.equal(searches, 2);
