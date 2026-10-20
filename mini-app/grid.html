@@ -44,7 +44,7 @@
 
     <button id="btn-refresh-all" class="btn" title="立即重新检查全部上墙直播间">全部刷新</button>
 
-    <button id="btn-live-only" class="btn" title="只显示当前正在直播的直播间，已下播/未开播的自动隐藏，在播的铺满整墙">只看在播</button>
+    <button id="btn-live-only" class="btn" title="只隐藏已确认未开播的房间；查询中或查询失败的房间仍然显示">隐藏未开播</button>
 
     <button id="btn-hud" class="btn" title="常驻显示名字、在线人数、场观、实时分辨率及标称帧率/码率（否则悬停才显示）">常显信息</button>
 
@@ -68,8 +68,8 @@
 
   <div id="liveonly-empty" class="empty-hint" hidden>
     <div class="empty-card">
-      <div class="empty-title">当前没有正在直播的直播间</div>
-      <div class="empty-desc">已开启「只看在播」，等有主播开播会自动出现。<br>点顶部「只看在播」可切回显示全部。</div>
+      <div class="empty-title">所有上墙房间均已确认未开播</div>
+      <div class="empty-desc">已开启「隐藏未开播」，后台会继续检查。<br>点顶部「隐藏未开播」可显示全部房间。</div>
     </div>
   </div>
 

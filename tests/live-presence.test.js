@@ -9,11 +9,12 @@ const {
   PRESENCE_GRACE_MS,
 } = livePresenceModule;
 
-test('初始检查态在只看在播中隐藏', () => {
+test('初始检查态保持可见，仅隐藏已确认未开播的房间', () => {
   const state = createPresence();
 
   assert.equal(state.availability, 'checking');
-  assert.equal(isHiddenByLiveOnly(true, state), true);
+  assert.equal(isHiddenByLiveOnly(true, state), false);
+  assert.equal(isHiddenByLiveOnly(true, undefined), false);
   assert.equal(isHiddenByLiveOnly(false, state), false);
 });
 
@@ -69,5 +70,22 @@ test('未确认过在播的未知结果保持检查态', () => {
   const state = reducePresence(createPresence(), { type: 'unknown' }, 10_000);
 
   assert.equal(state.availability, 'checking');
-  assert.equal(state.uncertainSince, null);
+  assert.equal(state.uncertainSince, 10_000);
+  assert.equal(isHiddenByLiveOnly(true, state), false);
+});
+
+test('上次确认离线后查询失败，恢复可见检查态而非持续隐藏', () => {
+  const offline = reducePresence(reducePresence(createPresence(), { type: 'offline' }, 1000), { type: 'offline' }, 2000);
+  const unknown = reducePresence(offline, { type: 'unknown' }, 3000);
+  assert.equal(unknown.availability, 'checking');
+  assert.equal(isHiddenByLiveOnly(true, unknown), false);
+});
+
+test('在播房间连续查询失败也会在宽限期后显示状态未知', () => {
+  const live = reducePresence(createPresence(), { type: 'live' }, 1000);
+  const first = reducePresence(live, { type: 'unknown' }, 2000);
+  const next = reducePresence(first, { type: 'unknown' }, 2000 + PRESENCE_GRACE_MS);
+  assert.equal(first.availability, 'live');
+  assert.equal(next.availability, 'checking');
+  assert.equal(isHiddenByLiveOnly(true, next), false);
 });

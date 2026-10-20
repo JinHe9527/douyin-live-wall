@@ -70,7 +70,7 @@ const state = {
   showBattle: false,     // 比赛战况（血条/成员分数）叠在画面上部（默认关）
   globalQuality: 'auto', // auto | origin | hd | sd | fluent
   hudAlways: false,      // 名字/分辨率/帧率/码率 是否常驻显示
-  liveOnly: false,       // 只显示当前在播（已下播/未开播的自动隐藏，其余格子铺满整墙）
+  liveOnly: false,       // 仅隐藏已确认未开播的房间，未知状态保留可见。
   autoRecording: { enabled: false, durationHours: 1, roomIds: [] },
   recordingRooms: new Set(),
 };
@@ -1388,7 +1388,7 @@ function applyLiveOnly() {
     const cell = gridEl.querySelector(`.cell[data-id="${room.id}"]`);
     if (cell) cell.classList.toggle('cell-hidden', isHiddenByLiveOnly(room));
   }
-  // 开了只看在播、但一个在播的都没有 → 给个提示，别让整墙空着让人以为坏了
+  // 只有所有房间都已确认未开播，才能显示这个空状态。
   if (liveOnlyEmpty) {
     liveOnlyEmpty.hidden = !(state.liveOnly && state.rooms.length > 0 && visibleRoomCount() === 0);
   }
@@ -1398,7 +1398,7 @@ if (btnLiveOnly) btnLiveOnly.addEventListener('click', () => {
   state.liveOnly = !state.liveOnly;
   applyLiveOnly();
   persist();
-  toast(state.liveOnly ? '只显示当前在播' : '显示全部直播间');
+  toast(state.liveOnly ? '隐藏已确认未开播的房间，保留状态未知的房间' : '显示全部直播间');
 });
 
 async function refreshAllRooms() {
