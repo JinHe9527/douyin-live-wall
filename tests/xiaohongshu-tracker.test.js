@@ -8,6 +8,64 @@ const candidate = { title: '宇宙-K', anchorId: 'host-k', roomUrl: fresh };
 const ended = { ok: false, status: 'offline', anchorName: '宇宙-K' };
 const live = { ok: true, status: 'live', anchorName: '宇宙-K', flvUrl: 'https://live.xhscdn.com/live.flv' };
 
+test('游客广场找到同一主播新场次时无需账号搜索，验证主播 ID 后更新旧链接', async () => {
+  let searches = 0;
+  const tracker = createXiaohongshuTracker({
+    resolve: async url => url === old ? ended : { ...live, anchorId: candidate.anchorId },
+    discover: async (name, identity) => {
+      assert.equal(identity.anchorId, candidate.anchorId);
+      assert.equal(identity.previousRoomUrl, old);
+      return { status: 'success', candidates: [{ ...candidate, anchorId: 'other-host' }, candidate] };
+    },
+    search: async () => { searches++; return { status: 'login_required' }; },
+  });
+  const result = await tracker.resolveRoom(old, 'fluent', { anchorId: candidate.anchorId });
+  assert.equal(result.refreshedRoom, true);
+  assert.equal(result.roomUrl, fresh);
+  assert.equal(searches, 0);
+});
+
+test('游客广场没找到时不误报下播；新场次主播 ID 不符时拒绝播放', async () => {
+  for (const discovered of [[], [candidate]]) {
+    const tracker = createXiaohongshuTracker({
+      resolve: async url => url === old ? ended : { ...live, anchorId: 'other-host' },
+      discover: async () => ({ status: 'success', candidates: discovered }),
+      search: async () => ({ status: 'login_required' }),
+    });
+    assert.equal((await tracker.resolveRoom(old, 'hd', { anchorId: candidate.anchorId })).status, 'unknown');
+  }
+});
+
+test('游客广场提供已验证的官方流时，不再依赖新场次分享页或账号查询', async () => {
+  const requests = [];
+  const tracker = createXiaohongshuTracker({
+    resolve: async url => { requests.push(url); return ended; },
+    discover: async () => ({ status: 'success', source: 'guest_square', candidates: [candidate] }),
+    resolveCandidate: async (found, quality) => {
+      assert.equal(found.anchorId, candidate.anchorId); assert.equal(quality, 'fluent');
+      return { ...live, anchorId: candidate.anchorId };
+    },
+    search: async () => { throw new Error('must-not-query-account'); },
+  });
+  assert.equal((await tracker.resolveRoom(old, 'fluent', { anchorId: candidate.anchorId })).refreshedRoom, true);
+  assert.deepEqual(requests, [old]);
+});
+
+test('分享页连接失败后可用广场同场次重建播放器，但明确结束的同场次不得复用', async () => {
+  for (const endedRoom of [false, true]) {
+    let usedStream = false;
+    const tracker = createXiaohongshuTracker({
+      resolve: async () => ({ ...ended, status: endedRoom ? 'offline' : 'unknown' }),
+      discover: async () => ({ status: 'success', source: 'guest_square', candidates: [{ ...candidate, roomUrl: old }] }),
+      resolveCandidate: async () => { usedStream = true; return live; },
+      search: async () => ({ status: 'login_required' }),
+    });
+    const result = await tracker.resolveRoom(old, 'fluent', { anchorId: candidate.anchorId });
+    assert.equal(result.ok, !endedRoom);
+    assert.equal(usedStream, !endedRoom);
+  }
+});
+
 test('旧场次结束后精确匹配主播，保留新场次认证参数及身份', async () => {
   const requests = [];
   const tracker = createXiaohongshuTracker({

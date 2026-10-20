@@ -9,6 +9,7 @@ const { createDouyinResolver } = require('../lib/douyin-resolver');
 const { playbackSession, resolveGuestFirst } = require('../lib/playback-access');
 const xiaohongshuStream = require('../lib/xiaohongshu-stream');
 const { createXiaohongshuTracker } = require('../lib/xiaohongshu-tracker');
+const { createXiaohongshuDirectory, resolveDirectoryCandidate } = require('../lib/xiaohongshu-directory');
 const { createDesktopStreamReader } = require('../lib/xiaohongshu-desktop');
 const { PLATFORMS, normalizePlatform, roomUrl } = require('../lib/live-platform');
 const { createPlatformWindows } = require('../lib/platform-windows');
@@ -56,6 +57,17 @@ const platformWindows = createPlatformWindows({
 const roomSearch = createRoomSearch({ BrowserWindow, session, userAgent: DESKTOP_UA, prepareWindow: blockMediaIn, onAuthStatus: platformWindows.reportSearchAuth });
 const trackingSearch = createRoomSearch({ BrowserWindow, session, userAgent: DESKTOP_UA, prepareWindow: blockMediaIn, onAuthStatus: platformWindows.reportSearchAuth });
 const desktopStreamReader = createDesktopStreamReader({ BrowserWindow, session, userAgent: DESKTOP_UA, prepareWindow: blockMediaIn });
+let directorySession;
+const xiaohongshuDirectory = createXiaohongshuDirectory({ BrowserWindow,
+  getSession: () => {
+    if (!directorySession) {
+      // 广场页面和移动分享页各用自己的游客 Cookie，避免多路刷新相互改写会话。
+      directorySession = session.fromPartition('live-wall-guest:xiaohongshu-directory');
+      installCdnHeaderRewrite(directorySession);
+    }
+    return directorySession;
+  },
+  userAgent: DESKTOP_UA, prepareWindow: blockMediaIn });
 const douyinResolvers = [true, false].map(guest => createDouyinResolver({ BrowserWindow,
   getSession: () => playbackSession(session, 'douyin', guest), userAgent: DESKTOP_UA,
   prepareWindow: blockMediaIn, pauseMedia: keepMediaPaused }));
@@ -72,6 +84,8 @@ const xiaohongshuTracker = createXiaohongshuTracker({
     loginStatus: () => platformWindows.loginStatus('xiaohongshu'),
   }),
   search: (name) => trackingSearch.search(name, 'xiaohongshu'),
+  discover: (name, identity) => xiaohongshuDirectory.search(name, identity),
+  resolveCandidate: resolveDirectoryCandidate,
 });
 const audienceMonitor = createAudienceMonitor({ BrowserWindow, session, userAgent: DESKTOP_UA, prepareWindow: blockMediaIn,
   onCount: (payload) => {
@@ -518,6 +532,7 @@ app.on('before-quit', () => {
   desktopStreamReader.stop();
   for (const resolver of douyinResolvers) resolver.stop();
   xiaohongshuTracker.stop();
+  xiaohongshuDirectory.stop();
   roomSearch.cancel();
   trackingSearch.cancel();
   audienceMonitor.stop();
