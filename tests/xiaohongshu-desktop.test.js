@@ -3,12 +3,13 @@ const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const { createDesktopStreamReader } = require('../lib/xiaohongshu-desktop');
 
-function harness({ mismatch = false, delay = false } = {}) {
+function harness({ mismatch = false, delay = false, getSession } = {}) {
   const windows = [];
   let inflight = 0, maximum = 0;
   class Window extends EventEmitter {
-    constructor() {
+    constructor(options) {
       super(); windows.push(this); this.dead = false; maximum = Math.max(maximum, ++inflight);
+      this.options = options;
       this.webContents = Object.assign(new EventEmitter(), { setUserAgent() {}, setAudioMuted() {}, setWindowOpenHandler() {},
         debugger: { attach() {}, isAttached: () => true, detach() {}, sendCommand: async () => {
           if (delay) await new Promise(setImmediate);
@@ -21,9 +22,19 @@ function harness({ mismatch = false, delay = false } = {}) {
     destroy() { this.dead = true; inflight--; this.emit('closed'); }
   }
   const reader = createDesktopStreamReader({ BrowserWindow: Window, session: { fromPartition: () => ({}) },
-    userAgent: 'test', timeoutMs: 30, concurrency: 2 });
+    getSession, userAgent: 'test', timeoutMs: 30, concurrency: 2 });
   return { reader, windows, maximum: () => maximum };
 }
+
+test('游客清晰度查询使用注入的独立会话，不借用账号登录态', async () => {
+  const guest = {};
+  const h = harness({ getSession: () => guest });
+  try {
+    await h.reader.read('https://www.xiaohongshu.com/livestream/123456');
+    assert.equal(h.windows[0].options.webPreferences.session, guest);
+    assert.equal(h.windows[0].dead, true);
+  } finally { h.reader.stop(); }
+});
 
 test('读取官方桌面流配置后释放窗口；同场次共用请求与缓存', async () => {
   const h = harness({ delay: true });

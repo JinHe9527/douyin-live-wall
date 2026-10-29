@@ -57,6 +57,19 @@ const platformWindows = createPlatformWindows({
 const roomSearch = createRoomSearch({ BrowserWindow, session, userAgent: DESKTOP_UA, prepareWindow: blockMediaIn, onAuthStatus: platformWindows.reportSearchAuth });
 const trackingSearch = createRoomSearch({ BrowserWindow, session, userAgent: DESKTOP_UA, prepareWindow: blockMediaIn, onAuthStatus: platformWindows.reportSearchAuth });
 const desktopStreamReader = createDesktopStreamReader({ BrowserWindow, session, userAgent: DESKTOP_UA, prepareWindow: blockMediaIn });
+let guestDesktopSession;
+const guestDesktopStreamReader = createDesktopStreamReader({ BrowserWindow,
+  getSession: () => {
+    if (!guestDesktopSession) {
+      guestDesktopSession = session.fromPartition('live-wall-guest:xiaohongshu-quality');
+      // 此会话只查询清晰度，不播放。连同页面 Worker 的媒体请求一并阻止。
+      guestDesktopSession.webRequest.onBeforeRequest({ urls: ['*://*/*'] }, (details, cb) => {
+        cb({ cancel: /\.(flv|m3u8|ts|m4s)(\?|$)/i.test(details.url) || details.resourceType === 'media' });
+      });
+    }
+    return guestDesktopSession;
+  },
+  userAgent: DESKTOP_UA, timeoutMs: 15000, cacheMs: 120000, concurrency: 2 });
 let directorySession;
 const xiaohongshuDirectory = createXiaohongshuDirectory({ BrowserWindow,
   getSession: () => {
@@ -74,7 +87,7 @@ const douyinResolvers = [true, false].map(guest => createDouyinResolver({ Browse
 function resolveXhs(url, quality, guest) {
   const fetchPage = (target, init) => playbackSession(session, 'xiaohongshu', guest).fetch(target, init);
   return xiaohongshuStream.resolveWithDesktop(fetchPage,
-    target => guest ? xiaohongshuStream.readGuestDesktopState(fetchPage, target, DESKTOP_UA)
+    target => guest ? guestDesktopStreamReader.read(target)
       : desktopStreamReader.read(target), url, { quality, preferShare: guest });
 }
 const xiaohongshuTracker = createXiaohongshuTracker({
@@ -85,7 +98,14 @@ const xiaohongshuTracker = createXiaohongshuTracker({
   }),
   search: (name) => trackingSearch.search(name, 'xiaohongshu'),
   discover: (name, identity) => xiaohongshuDirectory.search(name, identity),
-  resolveCandidate: resolveDirectoryCandidate,
+  resolveCandidate: async (candidate, quality) => {
+    // 广场给出的原画不是完整档位列表；新场次也要读取游客桌面转码配置。
+    if (['fluent', 'sd'].includes(quality)) {
+      const result = await resolveXhs(candidate.roomUrl, quality, true);
+      if (result.ok) return result;
+    }
+    return resolveDirectoryCandidate(candidate, quality);
+  },
 });
 const audienceMonitor = createAudienceMonitor({ BrowserWindow, session, userAgent: DESKTOP_UA, prepareWindow: blockMediaIn,
   onCount: (payload) => {
@@ -530,6 +550,7 @@ app.on('window-all-closed', () => app.quit());
 app.on('before-quit', () => {
   platformWindows.stop();
   desktopStreamReader.stop();
+  guestDesktopStreamReader.stop();
   for (const resolver of douyinResolvers) resolver.stop();
   xiaohongshuTracker.stop();
   xiaohongshuDirectory.stop();

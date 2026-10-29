@@ -14,6 +14,27 @@ test('游客分享页有流即返回，不等待后台桌面窗口', async () =>
   assert.equal(result.quality, 'LD');
 });
 
+test('游客选择流畅时跳过分享原画，查询官方桌面低码率流', async () => {
+  let reads = 0;
+  const original = { h264: [{ master_url: 'https://live-source-play.xhscdn.com/live/123456.flv', quality_type: 'HD' }] };
+  for (const quality of ['fluent', 'sd']) {
+    const result = await resolveWithDesktop(async () => ({ status: 200, text: async () => page({ pullConfig: original }) }),
+      async () => {
+        reads++;
+        return { roomId: '123456', liveStatus: 'success', roomData: { roomInfo: { pullConfig: { streams: [
+          { quality_type: 'FLV', max_bitrate: 3500000, master_url: original.h264[0].master_url },
+          { quality_type: 'HCV520', max_bitrate: 2000000, master_url: 'https://live-source-play.xhscdn.com/live/123456_hcv520.flv',
+            backup_urls: ['https://live-source-play-bak-tx.xhscdn.com/live/123456_hcv520.flv'] },
+        ] } } } };
+      }, '123456', { quality, preferShare: true });
+    assert.equal(result.quality, 'HCV520');
+    assert.equal(result.selectedBitrate, 2000000);
+    assert.equal(result.flvCandidates.length, 2);
+    assert.ok(result.flvCandidates.every(c => c.url.includes('_hcv520.flv')));
+  }
+  assert.equal(reads, 2);
+});
+
 test('游客桌面回退读取官方静态页面，拒绝登录跳转及外部链接', async () => {
   const url = 'https://www.xiaohongshu.com/livestream/123456?xsec_token=keep';
   const data = await readGuestDesktopState(async (target, init) => {
@@ -148,7 +169,7 @@ test('桌面官方 streams 配置按码率选择流畅档，原画仍使用原�
   assert.equal(fluent.anchorId, 'host-s1');
   assert.match(fluent.flvUrl, /_hcv520\.flv$/);
   assert.match(fluent.flvCandidates[1].url, /backup\.xhscdn/);
-  assert.ok(fluent.flvCandidates.some(item => /\/123\.flv$/.test(item.url)), '编码不支持时保留原画回退');
+  assert.ok(fluent.flvCandidates.every(item => /_hcv520\.flv$/.test(item.url)), '流畅档重试不得自动升回原画');
   assert.ok(fluent.flvCandidates.every(item => !item.url.includes('evil.example')));
   assert.match(parseLiveState(live, '123', 'sd').flvUrl, /_hcv520\.flv$/);
   assert.match(parseLiveState(live, '123', 'hd').flvUrl, /_hcv5402\.flv$/);
