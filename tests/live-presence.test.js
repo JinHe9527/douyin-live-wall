@@ -9,12 +9,12 @@ const {
   PRESENCE_GRACE_MS,
 } = livePresenceModule;
 
-test('初始检查态保持可见，仅隐藏已确认未开播的房间', () => {
+test('开关开启时隐藏初始检查态，关闭时显示全部', () => {
   const state = createPresence();
 
   assert.equal(state.availability, 'checking');
-  assert.equal(isHiddenByLiveOnly(true, state), false);
-  assert.equal(isHiddenByLiveOnly(true, undefined), false);
+  assert.equal(isHiddenByLiveOnly(true, state), true);
+  assert.equal(isHiddenByLiveOnly(true, undefined), true);
   assert.equal(isHiddenByLiveOnly(false, state), false);
 });
 
@@ -71,14 +71,14 @@ test('未确认过在播的未知结果保持检查态', () => {
 
   assert.equal(state.availability, 'checking');
   assert.equal(state.uncertainSince, 10_000);
-  assert.equal(isHiddenByLiveOnly(true, state), false);
+  assert.equal(isHiddenByLiveOnly(true, state), true);
 });
 
-test('上次确认离线后查询失败，恢复可见检查态而非持续隐藏', () => {
+test('离线后查询失败保留未知语义，开关开启时继续隐藏', () => {
   const offline = reducePresence(reducePresence(createPresence(), { type: 'offline' }, 1000), { type: 'offline' }, 2000);
   const unknown = reducePresence(offline, { type: 'unknown' }, 3000);
   assert.equal(unknown.availability, 'checking');
-  assert.equal(isHiddenByLiveOnly(true, unknown), false);
+  assert.equal(isHiddenByLiveOnly(true, unknown), true);
 });
 
 test('在播房间连续查询失败也会在宽限期后显示状态未知', () => {
@@ -87,5 +87,15 @@ test('在播房间连续查询失败也会在宽限期后显示状态未知', ()
   const next = reducePresence(first, { type: 'unknown' }, 2000 + PRESENCE_GRACE_MS);
   assert.equal(first.availability, 'live');
   assert.equal(next.availability, 'checking');
-  assert.equal(isHiddenByLiveOnly(true, next), false);
+  assert.equal(isHiddenByLiveOnly(true, next), true);
+});
+
+
+test('旧场次查不到新场次被隐藏，后台找到直播后重新出现，关闭过滤可查看原因', () => {
+  const missing = reducePresence(createPresence(), { type: 'unknown' }, 1000);
+  assert.equal(missing.availability, 'checking');
+  assert.equal(isHiddenByLiveOnly(true, missing), true);
+  assert.equal(isHiddenByLiveOnly(false, missing), false);
+  const found = reducePresence(missing, { type: 'live' }, 2000);
+  assert.equal(isHiddenByLiveOnly(true, found), false);
 });

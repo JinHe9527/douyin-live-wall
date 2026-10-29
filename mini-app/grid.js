@@ -70,7 +70,7 @@ const state = {
   showBattle: false,     // 比赛战况（血条/成员分数）叠在画面上部（默认关）
   globalQuality: 'auto', // auto | origin | hd | sd | fluent
   hudAlways: false,      // 名字/分辨率/帧率/码率 是否常驻显示
-  liveOnly: false,       // 仅隐藏已确认未开播的房间，未知状态保留可见。
+  liveOnly: false,       // 隐藏未确认在播的房间，后台继续查询。
   autoRecording: { enabled: false, durationHours: 1, roomIds: [] },
   recordingRooms: new Set(),
 };
@@ -136,6 +136,8 @@ class LivePlayer {
     this.currentFlvUrl = '';
     this.lastError = '';
     this.lastTime = 0;
+    this.healthCheckedAt = 0;
+    this.slowChecks = 0;
     this.destroyed = false;
     this.STALL_MS = 12000;     // 卡顿判定放宽到 12s（原画高码率短卡顿是常态）
 
@@ -151,8 +153,11 @@ class LivePlayer {
       this.attempts = 0;
       this.lastError = '';
       this.statusEl.title = '';
-      this.lastTime = videoEl.currentTime;
-      this.armStall();
+      if (!this.stallTimer) {
+        this.lastTime = videoEl.currentTime;
+        this.healthCheckedAt = Date.now();
+        this.armStall();
+      }
     });
     // 直播流不该真结束：video 触发 ended 多半是网络抖动/流过期 → 自愈重连，让接口去确认是否真下播
     videoEl.addEventListener('ended', () => { if (!this.destroyed) this.recover('video-ended'); });
@@ -251,11 +256,24 @@ class LivePlayer {
   armStall() {
     if (this.stallTimer) clearTimeout(this.stallTimer);
     this.stallTimer = setTimeout(() => {
+      this.stallTimer = null;
       if (this.destroyed) return;
-      if (this.videoEl.currentTime === this.lastTime && !this.videoEl.paused) {
+      const video = this.videoEl;
+      const now = Date.now();
+      const elapsed = Math.max(0, (now - this.healthCheckedAt) / 1000);
+      const progress = Math.max(0, video.currentTime - this.lastTime);
+      const buffered = video.buffered?.length ? video.buffered.end(video.buffered.length - 1) - video.currentTime : 0;
+      // 间歇前进几帧也可能已严重卡顿；连续两个窗口确认，避免短暂抖动反复重连。
+      const slow = this.room.platform === 'xiaohongshu' && elapsed >= 10
+        && progress < elapsed * 0.35 && buffered < 1.5 && !video.paused;
+      this.slowChecks = slow ? this.slowChecks + 1 : 0;
+      if (progress === 0 && !video.paused) {
         this.recover('stall');
+      } else if (this.slowChecks >= 2 && this.candidateIndex + 1 < this.streamCandidates.length) {
+        this.recover('slow-stream');
       } else {
-        this.lastTime = this.videoEl.currentTime;
+        this.lastTime = video.currentTime;
+        this.healthCheckedAt = now;
         this.armStall();
       }
     }, this.STALL_MS);
@@ -268,6 +286,9 @@ class LivePlayer {
       return;
     }
     this.destroyPlayer();
+    this.slowChecks = 0;
+    this.lastTime = 0;
+    this.healthCheckedAt = Date.now();
     this.currentFlvUrl = flvUrl;
     this.room.flvUrl = flvUrl;
     if (this.room.platform === 'xiaohongshu' && this.room.webRid) {
@@ -358,6 +379,8 @@ class LivePlayer {
     player.load();
     const p = this.videoEl.play();
     if (p && p.catch) p.catch(() => {});
+    // 首帧未出现时同样监测，避免一直停在连接中而不切换线路。
+    this.armStall();
   }
 
   async start(flvUrl) {
@@ -1388,7 +1411,7 @@ function applyLiveOnly() {
     const cell = gridEl.querySelector(`.cell[data-id="${room.id}"]`);
     if (cell) cell.classList.toggle('cell-hidden', isHiddenByLiveOnly(room));
   }
-  // 只有所有房间都已确认未开播，才能显示这个空状态。
+  // 过滤后没有可显示的房间时提示后台仍在查询。
   if (liveOnlyEmpty) {
     liveOnlyEmpty.hidden = !(state.liveOnly && state.rooms.length > 0 && visibleRoomCount() === 0);
   }
@@ -1398,7 +1421,7 @@ if (btnLiveOnly) btnLiveOnly.addEventListener('click', () => {
   state.liveOnly = !state.liveOnly;
   applyLiveOnly();
   persist();
-  toast(state.liveOnly ? '隐藏已确认未开播的房间，保留状态未知的房间' : '显示全部直播间');
+  toast(state.liveOnly ? '已隐藏未开播和未找到新场次的房间，后台继续查询' : '显示全部直播间');
 });
 
 async function refreshAllRooms() {

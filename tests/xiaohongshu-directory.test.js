@@ -136,3 +136,13 @@ test('停止、超时和非游客页面会结束等待并关闭窗口', async ()
     assert.equal((await h.directory.search(a.title)).status, 'cancelled');
   }
 });
+
+
+test('连续重复页不代表查询结束，后续页仍能找到已保存主播', async () => {
+  const h = harness([page([]), page([]), page([]), page([]), page([a], { noMore: true })], { maxPages: 10 });
+  try {
+    const result = await h.directory.search(a.title, { anchorId: a.anchorId });
+    assert.equal(result.candidates.find(item => item.anchorId === a.anchorId)?.id, a.id);
+    assert.equal(h.calls(), 5);
+  } finally { h.directory.stop(); }
+});

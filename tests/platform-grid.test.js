@@ -39,8 +39,8 @@ function harness(saved, search = async () => ({ status: 'success', candidates: [
     setInterval() {}, setTimeout() {}, clearTimeout() {},
   });
   vm.runInContext(fs.readFileSync(require.resolve('../mini-app/grid.js'), 'utf8')
-    + '\nwindow.testApi = { state, players, LivePlayer, switchPlatform, addFromInput, persist, searchRooms, addSearchCandidate, closeSearch, applyAudience, audienceText, updateLoginUI, refreshLoginStatus };', context);
-  return { api: context.window.testApi, window: context.window, mini, element, calls, elements, settle: () => new Promise(setImmediate) };
+    + '\nwindow.testApi = { state, players, LivePlayer, switchPlatform, addFromInput, persist, searchRooms, addSearchCandidate, closeSearch, applyAudience, audienceText, updateLoginUI, refreshLoginStatus, applyLiveOnly };', context);
+  return { context, api: context.window.testApi, window: context.window, mini, element, calls, elements, settle: () => new Promise(setImmediate) };
 }
 
 test('两个平台显示当前播放尺寸，随视频 resize 更新而不被原画标称值覆盖', async () => {
@@ -334,4 +334,48 @@ test('重启保留主动清空的抖音库，同时恢复非当前平台录制�
   await h.settle();
   assert.equal(h.api.state.library.length, 0);
   assert.ok(h.calls.recording.some((config) => config.platform === 'xiaohongshu' && config.autoRecording.enabled));
+});
+
+
+test('隐藏旧场次未知格子时保留播放器轮询，找到新场次自动显示', async () => {
+  const h = harness({ activePlatform: 'xiaohongshu', profiles: { xiaohongshu: { library: [], wall: [] } } });
+  await h.settle();
+  const room = { id: 'hidden', name: '主播', platform: 'xiaohongshu', kind: 'live', url: 'https://www.xiaohongshu.com/livestream/123456', presence: presence.createPresence() };
+  let hidden = false, resolves = 0;
+  const cell = { querySelector: () => h.element(), classList: { toggle: (name, value) => { if (name === 'cell-hidden') hidden = value; } } };
+  h.elements.get('grid').querySelector = () => cell;
+  h.api.state.rooms = [room]; h.api.state.liveOnly = true;
+  const player = new h.api.LivePlayer(h.element(), h.element(), room);
+  player.create = () => {};
+  h.api.players.set(room.id, player);
+  h.api.applyLiveOnly();
+  assert.equal(hidden, true);
+  assert.equal(player.destroyed, false);
+  h.mini.resolve = async () => { resolves++; return { ok: true, webRid: '789012', roomUrl: 'https://www.xiaohongshu.com/livestream/789012', flvUrl: 'https://live.xhscdn.com/789012.flv', refreshedRoom: true }; };
+  player.recheck(); await h.settle();
+  assert.equal(resolves, 1);
+  assert.equal(hidden, false);
+  assert.equal(room.url, 'https://www.xiaohongshu.com/livestream/789012');
+  assert.equal(h.api.players.get(room.id), player);
+});
+
+test('首帧卡住会恢复，短抖动不换线，连续严重卡顿才切备用线路', async () => {
+  const h = harness({ library: [], wall: [] }); await h.settle();
+  let now = 1000, timer;
+  h.context.Date = { now: () => now };
+  h.context.setTimeout = fn => { timer = fn; return 1; };
+  const video = { ...h.element(), currentTime: 0, paused: false, buffered: { length: 1, end: () => video.currentTime + 0.2 } };
+  const player = new h.api.LivePlayer(video, h.element(), { id: 'slow', platform: 'xiaohongshu', presence: presence.createPresence() });
+  player.streamCandidates = [{ url: 'a' }, { url: 'b' }]; player.candidateIndex = 0;
+  const recovered = []; player.recover = reason => recovered.push(reason);
+  player.healthCheckedAt = now; player.armStall(); now += 12000; timer();
+  assert.deepEqual(recovered, ['stall']); recovered.length = 0; player.slowChecks = 0;
+  player.healthCheckedAt = now; player.armStall();
+  now += 12000; video.currentTime += 1; timer();
+  assert.equal(recovered.length, 0);
+  now += 12000; video.currentTime += 12; timer();
+  assert.equal(player.slowChecks, 0);
+  now += 12000; video.currentTime += 1; timer();
+  now += 12000; video.currentTime += 1; timer();
+  assert.deepEqual(recovered, ['slow-stream']);
 });
